@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Excel出力 動作テスト</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+<style>
+body { font-family: sans-serif; padding: 20px; background: #f0f4f8; }
+button { background: #4ade80; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; cursor: pointer; margin: 8px; }
+button:hover { background: #22c55e; }
+#log { background: white; border: 1px solid #ccc; border-radius: 8px; padding: 16px; margin-top: 16px; min-height: 200px; font-family: monospace; white-space: pre-wrap; }
+.ok { color: green; } .err { color: red; } .info { color: #333; }
+</style>
+</head>
+<body>
+<h2>🔍 Excel出力 動作テスト</h2>
+<p>このページは timecard.html の Excel出力ロジックを単体でテストします。</p>
+
+<div>
+  <label>テスト対象月: <input type="month" id="month" value="2026-03"></label>
+</div>
+<br>
+<button onclick="runTest()">▶ テスト実行 (コンソール確認のみ)</button>
+<button onclick="runExport()">📥 実際にExcelを出力してみる</button>
+
+<div id="log">テスト待機中...\n</div>
+
+<script>
+const log = document.getElementById('log');
+function append(msg, cls='info') {
+  const span = document.createElement('span');
+  span.className = cls;
+  span.textContent = msg + '\n';
+  log.appendChild(span);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function loadTemplate() {
+  // timecard.html からBase64を読み込む（同じフォルダにある）
+  const resp = await fetch('timecard.html');
+  const html = await resp.text();
+  const match = html.match(/const EXCEL_TEMPLATE_B64 = '([A-Za-z0-9+/=]+)'/);
+  if (!match) throw new Error('Base64テンプレートが見つかりません');
+  return match[1];
+}
+
+async function runTest() {
+  log.innerHTML = '';
+  append('=== テスト開始 ===');
+  
+  const [yearStr, monthStr] = document.getElementById('month').value.split('-');
+  const year = parseInt(yearStr);
+  const month = parseInt(monthStr);
+  append(`対象月: ${year}年${month}月`);
+
+  try {
+    const b64 = await loadTemplate();
+    append(`✅ Base64テンプレート読み込み成功 (${b64.length}文字)`, 'ok');
+
+    const binaryStr = atob(b64);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+    
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(bytes.buffer);
+    append(`✅ ExcelJS ワークブック読み込み成功`, 'ok');
+    append(`  シート数: ${workbook.worksheets.length}`);
+    
+    const ws = workbook.worksheets[1]; // 草野シート
+    append(`  テスト対象シート: "${ws.name}"`);
+    
+    // ヘッダー行検出テスト
+    let startRow = -1;
+    ws.eachRow((row, rowNumber) => {
+      if (startRow !== -1) return;
+      let isHeader = false;
+      row.eachCell((cell) => {
+        const v = cell.value;
+        if (typeof v === 'string' && (v.includes('出勤') || v.includes('曜日') || v.includes('退勤'))) {
+          isHeader = true;
+        }
+      });
+      if (isHeader) {
+        startRow = rowNumber + 1;
+        append(`  ヘッダー行: ${rowNumber}行目 → データ開始: ${startRow}行目`);
+      }
+    });
+    if (startRow === -1) { startRow = 2; append(`  ヘッダー未検出 → デフォルト2行目`); }
+
+    // 日付書き込みテスト (最初の3日分だけ)
+    append('\n--- 日付書き込みテスト (最初3日) ---');
+    for (let d = 1; d <= 3; d++) {
+      const row = ws.getRow(startRow + d - 1);
+      [1,2,3,4,5,6,7,16].forEach(c => { row.getCell(c).value = null; });
+      const dateVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
+      row.getCell(1).value = dateVal;
+      row.getCell(1).numFmt = 'yyyy/m/d';
+      const dow = ['日','月','火','水','木','金','土'][new Date(year, month-1, d).getDay()];
+      row.getCell(2).value = dow;
+      
+      // 読み返して確認
+      const writtenDate = row.getCell(1).value;
+      const writtenDow = row.getCell(2).value;
+      const dateStr = writtenDate instanceof Date 
+        ? `${writtenDate.getUTCFullYear()}/${writtenDate.getUTCMonth()+1}/${writtenDate.getUTCDate()}`
+        : String(writtenDate);
+      
+      append(`  ${d}日: セル1=${dateStr} 曜日=${writtenDow}`, dateStr.includes(`${month}/`) ? 'ok' : 'err');
+    }
+    append('\n✅ テスト完了！日付が正しく書かれていれば修正成功です', 'ok');
+  } catch(e) {
+    append(`❌ エラー: ${e.message}`, 'err');
+    console.error(e);
+  }
+}
+
+async function runExport() {
+  log.innerHTML = '';
+  append('=== 実際のExcel出力 ===');
+  const [yearStr, monthStr] = document.getElementById('month').value.split('-');
+  const year = parseInt(yearStr);
+  const month = parseInt(monthStr);
+  append(`対象: ${year}年${month}月`);
+  
+  try {
+    const b64 = await loadTemplate();
+    const binaryStr = atob(b64);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+    
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(bytes.buffer);
+    
+    workbook.worksheets.forEach(ws => {
+      let startRow = -1;
+      ws.eachRow((row, rowNumber) => {
+        if (startRow !== -1) return;
+        let isHeader = false;
+        row.eachCell((cell) => {
+          const v = cell.value;
+          if (typeof v === 'string' && (v.includes('出勤') || v.includes('曜日') || v.includes('退勤'))) isHeader = true;
+        });
+        if (isHeader) startRow = rowNumber + 1;
+      });
+      if (startRow === -1) startRow = 2;
+      
+      const daysInMonth = new Date(year, month, 0).getDate();
+      for (let d = 1; d <= 31; d++) {
+        const row = ws.getRow(startRow + d - 1);
+        [1,2,3,4,5,6,7,16].forEach(c => { row.getCell(c).value = null; });
+        if (d <= daysInMonth) {
+          row.getCell(1).value = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
+          row.getCell(1).numFmt = 'yyyy/m/d';
+          row.getCell(2).value = ['日','月','火','水','木','金','土'][new Date(year,month-1,d).getDay()];
+        }
+      }
+    });
+    
+    const buf = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `テスト_${year}${String(month).padStart(2,'0')}_出力.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    append(`✅ ダウンロード開始！ファイル名: テスト_${year}${String(month).padStart(2,'0')}_出力.xlsx`, 'ok');
+    append('Excelで開いてA列の日付が3月になっていることを確認してください。');
+  } catch(e) {
+    append(`❌ エラー: ${e.message}`, 'err');
+  }
+}
+</script>
+</body>
+</html>

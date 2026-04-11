@@ -158,10 +158,11 @@
                         const now = new Date().toLocaleString('ja-JP');
                         localStorage.setItem('timecard_last_sync', now);
                         setSyncStatus({ state: 'success', message: 'GASにデータなし（正常）', lastSync: now });
-                        return { success: true, count: 0 };
+                        return { success: true, count: 0, merged: [] };
                     }
 
                     // ローカルとGASデータをマージ（IDで重複排除、GASデータを最新として採用）
+                    let finalMerged = [];
                     setTimeRecords(prev => {
                         const merged = [...prev];
                         gasRecords.forEach(gasRec => {
@@ -172,6 +173,7 @@
                                 merged.push(gasRec); // なければ追加
                             }
                         });
+                        finalMerged = merged;
                         return merged;
                     });
 
@@ -181,7 +183,7 @@
                     const now = new Date().toLocaleString('ja-JP');
                     localStorage.setItem('timecard_last_sync', now);
                     setSyncStatus({ state: 'success', message: gasRecords.length + '件を取得しました', lastSync: now });
-                    return { success: true, count: gasRecords.length };
+                    return { success: true, count: gasRecords.length, merged: finalMerged };
 
                 } catch(e) {
                     const msg = e.message || '不明なエラー';
@@ -190,9 +192,15 @@
                 }
             };
 
-            // GAS URL変更時・起動時に自動同期
+            // GAS URL変更時・起動時・定期的に自動同期
             useEffect(() => {
-                if (gasUrl) syncFromGAS(gasUrl, true);
+                if (gasUrl) {
+                    syncFromGAS(gasUrl, true);
+                    const intervalId = setInterval(() => {
+                        syncFromGAS(gasUrl, true);
+                    }, 60000); // 1分ごとに自動同期
+                    return () => clearInterval(intervalId);
+                }
             }, [gasUrl]);
 
             return { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, syncFromGAS, syncStatus };
@@ -874,19 +882,49 @@
                 }
             };
 
-            const handlePunch = (type) => {
+            const handlePunch = async (type) => {
                 if (!selectedStaffName) return;
+
+                // --- 追加：打刻直前に同期して最新状態を確認 ---
+                let latestRecords = timeRecords;
+                if (gasUrl) {
+                    try {
+                        const syncRes = await syncFromGAS(gasUrl, true);
+                        if (syncRes.success && syncRes.merged) {
+                            latestRecords = syncRes.merged;
+                        }
+                    } catch(e) { /* 同期失敗時は既存レコードで続行 */ }
+                }
+                // ----------------------------------------------
+
                 const now = new Date();
                 const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
                 const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) + ':00';
                 const recordId = `${selectedStaffName}_${dateStr}`;
                 
                 let additionalBreakPromptMins = 0;
-                const existingRec = timeRecords.find(r => r.id === recordId);
+                const existingRec = latestRecords.find(r => r.id === recordId);
                 
                 if (existingRec?.isPaidLeave && type !== 'update_info') {
                     alert('本日すでに【有給】で申請されています！打刻する場合は、履歴画面から有給をキャンセルしてください。');
                     return;
+                }
+
+                if (type === 'in' && existingRec?.clockIn) {
+                    alert('すでに「出勤」で打刻されています！\n（他の端末で打刻された情報が同期されました）');
+                    return;
+                }
+                if (type === 'out' && existingRec?.clockOut) {
+                   alert('すでに「退勤」で打刻されています！\n（他の端末で打刻された情報が同期されました）');
+                   return;
+                }
+                if (type === 'break_in' && existingRec?.breakStart) {
+                   alert('すでに「中抜け開始」で打刻されています！\n（他の端末で打刻された情報が同期されました）');
+                   return;
+                }
+                if (type === 'break_out' && existingRec?.breakEnd) {
+                   alert('すでに「中抜け終了」で打刻されています！\n（他の端末で打刻された情報が同期されました）');
+                   return;
                 }
 
                 if (type === 'out' && existingRec?.clockIn) {

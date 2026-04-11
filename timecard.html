@@ -66,15 +66,19 @@
         // --- データ管理（LocalStorage） ---
         const useAppData = () => {
             const [staffList, setStaffList] = useState(() => {
+                const withDefaults = (s) => {
+                    const base = typeof s === 'string' ? { name: s, defaultMeal: true } : s;
+                    return { isOutsourced: false, hourlyRate: 1200, dailyTransport: 0, ...base };
+                };
                 const saved = localStorage.getItem('timecard_staff_v2');
-                if (saved) return JSON.parse(saved);
-                
+                if (saved) return JSON.parse(saved).map(withDefaults);
+
                 const oldSaved = localStorage.getItem('timecard_staff');
                 if (oldSaved) {
-                    return JSON.parse(oldSaved).map(s => typeof s === 'string' ? { name: s, defaultMeal: true } : s);
+                    return JSON.parse(oldSaved).map(withDefaults);
                 }
                 return ["草野", "田中", "小出", "高橋", "小田", "林", "山田", "市川（悠）", "谷口", "森川", "五十嵐", "市川（公）"].map(name => ({
-                    name, defaultMeal: true
+                    name, defaultMeal: true, isOutsourced: false, hourlyRate: 1200, dailyTransport: 0
                 }));
             });
 
@@ -612,7 +616,7 @@
 
             const handleAddStaff = () => {
                 if (newStaffName && !staffList.find(s => s.name === newStaffName)) {
-                    setStaffList([...staffList, { name: newStaffName, defaultMeal: true }]);
+                    setStaffList([...staffList, { name: newStaffName, defaultMeal: true, isOutsourced: false, hourlyRate: 1200, dailyTransport: 0 }]);
                     setNewStaffName('');
                 } else if(staffList.find(s => s.name === newStaffName)) {
                     alert('すでに同じ名前のスタッフがいます。');
@@ -620,6 +624,9 @@
             };
 
             const toggleMealSetting = (name) => setStaffList(staffList.map(s => s.name === name ? { ...s, defaultMeal: !s.defaultMeal } : s));
+            const toggleOutsourced = (name) => setStaffList(staffList.map(s => s.name === name ? { ...s, isOutsourced: !s.isOutsourced } : s));
+            const updateHourlyRate = (name, val) => setStaffList(staffList.map(s => s.name === name ? { ...s, hourlyRate: parseInt(val) || 0 } : s));
+            const updateDailyTransport = (name, val) => setStaffList(staffList.map(s => s.name === name ? { ...s, dailyTransport: parseInt(val) || 0 } : s));
             const handleRemoveStaff = (name) => {
                 if (window.confirm(`${name}さんを削除しますか？\n（過去の打刻データは消えませんが、プルダウンに表示されなくなります）`)) {
                     setStaffList(staffList.filter(s => s.name !== name));
@@ -709,7 +716,7 @@
                     });
 
                     // ステップ2: staffListに登録されたスタッフのシートに勤怠データを書き込み
-                    staffList.forEach(staff => {
+                    staffList.filter(s => !s.isOutsourced).forEach(staff => {
                         const ws = workbook.getWorksheet(staff.name);
                         if (!ws) return;
 
@@ -812,6 +819,222 @@
                 }
             };
 
+            // ===== 外注者専用エクセル出力（給与計算付き）=====
+            const handleExportOutsourced = async () => {
+                try {
+                    const outsourcedStaff = staffList.filter(s => s.isOutsourced);
+                    if (outsourcedStaff.length === 0) {
+                        alert('外注者が設定されていません。スタッフ設定で「外注者」をONにしてください。');
+                        return;
+                    }
+
+                    const [yearStr, monthStr] = targetMonth.split('-');
+                    const year = parseInt(yearStr);
+                    const month = parseInt(monthStr);
+                    const daysInMonth = new Date(year, month, 0).getDate();
+                    const DAYS_JP = ['日', '月', '火', '水', '木', '金', '土'];
+                    const TIME_FMT = 'h:mm';
+                    const HOUR_FMT = '[h]:mm';
+
+                    const timeToFrac = (t) => {
+                        if (!t) return null;
+                        const [h, m, s] = t.split(':').map(Number);
+                        return ((h || 0) * 3600 + (m || 0) * 60 + (s || 0)) / 86400;
+                    };
+
+                    const workbook = new ExcelJS.Workbook();
+
+                    outsourcedStaff.forEach(staff => {
+                        const ws = workbook.addWorksheet(staff.name);
+                        const hourlyRate = staff.hourlyRate || 1200;
+                        const dailyTransport = staff.dailyTransport || 0;
+
+                        ws.columns = [
+                            { width: 11 }, { width: 5.1 }, { width: 8.1 }, { width: 6 },
+                            { width: 8.9 }, { width: 6 }, { width: 6 }, { width: 6.4 },
+                            { width: 5.1 }, { width: 3.1 }, { width: 8 }, { width: 7.1 },
+                            { width: 10 }, { width: 9.1 }, { width: 9.1 }, { width: 4.5 }, { width: 20 }
+                        ];
+
+                        // タイトル行（スタッフ名・対象年月）
+                        ws.getRow(1).getCell(1).value = `${staff.name}　${year}年${month}月分　外注タイムカード`;
+                        ws.getRow(1).getCell(1).font = { bold: true, size: 13 };
+
+                        // ヘッダー行
+                        const hdrs = ['日付','曜日','土日祝','出勤','休憩開始','休憩終了','退勤','賄い','日数','','勤務時間','休憩控除','計算時間','8時間超','深夜時間','','備考'];
+                        hdrs.forEach((h, i) => { ws.getRow(2).getCell(i + 1).value = h; });
+                        ws.getRow(2).font = { bold: true };
+                        ws.getRow(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F5E9' } };
+
+                        let totalMeal = 0, totalDays = 0;
+                        let totalWorkFrac = 0, totalCalcFrac = 0, totalOvertimeFrac = 0, totalLateNightFrac = 0;
+                        let weekdayCalcFrac = 0, holidayCalcFrac = 0;
+
+                        for (let d = 1; d <= 31; d++) {
+                            const rowNum = d + 2; // データは3行目から
+                            const row = ws.getRow(rowNum);
+                            if (d > daysInMonth) continue;
+
+                            const dateVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
+                            const dow = new Date(year, month - 1, d).getDay();
+                            const isWeekend = dow === 0 || dow === 6;
+
+                            row.getCell(1).value = dateVal;
+                            row.getCell(1).numFmt = 'yyyy/m/d';
+                            row.getCell(2).value = DAYS_JP[dow];
+                            row.getCell(3).value = isWeekend ? '土日祝' : '平日';
+
+                            // 土日は背景色
+                            if (dow === 0) { [1,2,3].forEach(c => row.getCell(c).fill = { type:'pattern', pattern:'solid', fgColor:{argb:'FFFFF0F0'} }); }
+                            else if (dow === 6) { [1,2,3].forEach(c => row.getCell(c).fill = { type:'pattern', pattern:'solid', fgColor:{argb:'FFF0F0FF'} }); }
+
+                            const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+                            const record = timeRecords.find(r => r.id === `${staff.name}_${dateStr}`);
+
+                            if (record && !record.isPaidLeave && record.clockIn && record.clockOut) {
+                                const ci = timeToFrac(record.clockIn);
+                                const co = timeToFrac(record.clockOut);
+                                let bs = timeToFrac(record.breakStart);
+                                let be = timeToFrac(record.breakEnd);
+
+                                if (record.additionalBreakMins > 0 && !bs && !be) {
+                                    bs = timeToFrac('12:00:00');
+                                    const eh = 12 + Math.floor(record.additionalBreakMins / 60);
+                                    const em = record.additionalBreakMins % 60;
+                                    be = timeToFrac(`${String(eh).padStart(2,'0')}:${String(em).padStart(2,'0')}:00`);
+                                }
+
+                                row.getCell(4).value = ci; row.getCell(4).numFmt = TIME_FMT;
+                                if (bs != null) { row.getCell(5).value = bs; row.getCell(5).numFmt = TIME_FMT; }
+                                if (be != null) { row.getCell(6).value = be; row.getCell(6).numFmt = TIME_FMT; }
+                                row.getCell(7).value = co; row.getCell(7).numFmt = TIME_FMT;
+                                if (record.meal) { row.getCell(8).value = 1; totalMeal++; }
+
+                                let workFrac = co - ci;
+                                if (workFrac < 0) workFrac += 1; // 日跨ぎ対応
+                                if (bs != null && be != null) workFrac -= (be - bs);
+                                if (workFrac < 0) workFrac = 0;
+
+                                // 休憩控除：6時間超なら30分
+                                const breakDeduct = workFrac > (6 / 24) ? (30 / 1440) : 0;
+                                const calcFrac = Math.max(0, workFrac - breakDeduct);
+                                const overtimeFrac = calcFrac > (8 / 24) ? calcFrac - (8 / 24) : 0;
+
+                                // 深夜時間（22時以降・5時以前）
+                                const fiveAM = 5 / 24, tenPM = 22 / 24;
+                                let lateNight = 0;
+                                if (ci < fiveAM) lateNight += fiveAM - ci;
+                                if (co > tenPM) lateNight += co - tenPM;
+
+                                row.getCell(9).value = 1;
+                                row.getCell(11).value = workFrac; row.getCell(11).numFmt = HOUR_FMT;
+                                row.getCell(12).value = breakDeduct; row.getCell(12).numFmt = HOUR_FMT;
+                                row.getCell(13).value = calcFrac; row.getCell(13).numFmt = HOUR_FMT;
+                                if (overtimeFrac > 0) { row.getCell(14).value = overtimeFrac; row.getCell(14).numFmt = HOUR_FMT; }
+                                if (lateNight > 0) { row.getCell(15).value = lateNight; row.getCell(15).numFmt = HOUR_FMT; }
+                                if (record.remarks) row.getCell(17).value = record.remarks;
+
+                                totalDays++;
+                                totalWorkFrac += workFrac;
+                                totalCalcFrac += calcFrac;
+                                totalOvertimeFrac += overtimeFrac;
+                                totalLateNightFrac += lateNight;
+                                if (isWeekend) holidayCalcFrac += calcFrac;
+                                else weekdayCalcFrac += calcFrac;
+
+                            } else if (record?.isPaidLeave) {
+                                row.getCell(17).value = '【有給申請】 ' + (record.remarks || '');
+                            }
+                        }
+
+                        // 集計ラベル行（35行目）
+                        const subRow = ws.getRow(35);
+                        ['回数','日数','','','勤務時間','休憩控除','計算時間','8時間超','深夜時間'].forEach((v, i) => {
+                            if (v) subRow.getCell([8,9,10,10,11,12,13,14,15][i]).value = v;
+                        });
+                        subRow.font = { bold: true };
+                        subRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9C4' } };
+
+                        // 合計行（36行目）
+                        const totRow = ws.getRow(36);
+                        totRow.getCell(5).value = '合計';
+                        totRow.getCell(8).value = totalMeal;
+                        totRow.getCell(9).value = totalDays;
+                        totRow.getCell(11).value = totalWorkFrac; totRow.getCell(11).numFmt = HOUR_FMT;
+                        totRow.getCell(13).value = totalCalcFrac; totRow.getCell(13).numFmt = HOUR_FMT;
+                        totRow.getCell(14).value = totalOvertimeFrac; totRow.getCell(14).numFmt = HOUR_FMT;
+                        totRow.getCell(15).value = totalLateNightFrac; totRow.getCell(15).numFmt = HOUR_FMT;
+                        totRow.font = { bold: true };
+                        totRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F5E9' } };
+
+                        // 給与計算ブロック（38〜44行目）
+                        const weekdayH = Math.round(weekdayCalcFrac * 24 * 100) / 100;
+                        const holidayH = Math.round(holidayCalcFrac * 24 * 100) / 100;
+                        const totalH = Math.round(totalCalcFrac * 24 * 100) / 100;
+                        const remuneration = Math.round(totalH * hourlyRate);
+                        const transportTotal = dailyTransport * totalDays;
+                        const mealCost = totalMeal * 300;
+                        const totalBill = remuneration + transportTotal + mealCost;
+
+                        // 時間内訳ヘッダー
+                        const ph = ws.getRow(38);
+                        ph.getCell(11).value = '平日(h)'; ph.getCell(12).value = '土日祝(h)'; ph.getCell(13).value = '合計(h)';
+                        ph.font = { bold: true };
+
+                        ws.getRow(39).getCell(11).value = weekdayH;
+                        ws.getRow(39).getCell(12).value = holidayH;
+                        ws.getRow(39).getCell(13).value = totalH;
+                        ws.getRow(39).font = { bold: true };
+
+                        // 給与明細
+                        const calcStyle = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF3E0' } };
+                        ws.getRow(38).fill = calcStyle;
+
+                        const labelFont = { bold: true };
+                        const moneyFmt = '#,##0"円"';
+
+                        ws.getRow(41).getCell(5).value = '時給'; ws.getRow(41).getCell(5).font = labelFont;
+                        ws.getRow(41).getCell(6).value = hourlyRate; ws.getRow(41).getCell(6).numFmt = moneyFmt;
+
+                        ws.getRow(42).getCell(5).value = '1日交通費'; ws.getRow(42).getCell(5).font = labelFont;
+                        ws.getRow(42).getCell(6).value = dailyTransport; ws.getRow(42).getCell(6).numFmt = moneyFmt;
+
+                        ws.getRow(43).getCell(5).value = '報酬'; ws.getRow(43).getCell(5).font = labelFont;
+                        ws.getRow(43).getCell(6).value = remuneration; ws.getRow(43).getCell(6).numFmt = moneyFmt;
+                        ws.getRow(43).getCell(7).value = `(${totalH}時間 × ${hourlyRate.toLocaleString()}円)`;
+
+                        ws.getRow(44).getCell(5).value = '交通費'; ws.getRow(44).getCell(5).font = labelFont;
+                        ws.getRow(44).getCell(6).value = transportTotal; ws.getRow(44).getCell(6).numFmt = moneyFmt;
+                        ws.getRow(44).getCell(7).value = `(${dailyTransport.toLocaleString()}円 × ${totalDays}日)`;
+
+                        ws.getRow(45).getCell(5).value = '賄い代'; ws.getRow(45).getCell(5).font = labelFont;
+                        ws.getRow(45).getCell(6).value = mealCost; ws.getRow(45).getCell(6).numFmt = moneyFmt;
+                        ws.getRow(45).getCell(7).value = `(300円 × ${totalMeal}回)`;
+
+                        const billRow = ws.getRow(47);
+                        billRow.getCell(5).value = '請求合計';
+                        billRow.getCell(5).font = { bold: true, size: 13 };
+                        billRow.getCell(6).value = totalBill;
+                        billRow.getCell(6).numFmt = moneyFmt;
+                        billRow.getCell(6).font = { bold: true, size: 13 };
+                        billRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE4EC' } };
+                    });
+
+                    const outBuffer = await workbook.xlsx.writeBuffer();
+                    const blob = new Blob([outBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                    const link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = `外注タイムカード_${year}${String(month).padStart(2,'0')}給与分.xlsx`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    alert('外注者エクセルを出力しました！');
+                } catch (error) {
+                    console.error(error);
+                    alert('外注者エクセルの出力中にエラーが発生しました。\n' + error.message);
+                }
+            };
+
             return (
                 <div className="animate-fade-in space-y-8 text-left w-full relative z-10">
                     <div className="border-b-2 border-primary/20 pb-4 mb-6 flex justify-between items-center">
@@ -837,6 +1060,11 @@
                             <button onClick={handleExportWithTemplate} className="w-full bg-gradient-to-r from-secondary to-[#65a30d] hover:brightness-110 text-white font-bold py-4 px-6 rounded-xl shadow-md transition-all active:scale-95 text-lg border-b-4 border-[#4d7c0f] flex items-center justify-center gap-2">
                                 📥 エクセルファイルを出力する
                             </button>
+                            {staffList.some(s => s.isOutsourced) && (
+                                <button onClick={handleExportOutsourced} className="w-full bg-gradient-to-r from-orange-400 to-orange-500 hover:brightness-110 text-white font-bold py-4 px-6 rounded-xl shadow-md transition-all active:scale-95 text-lg border-b-4 border-orange-600 flex items-center justify-center gap-2">
+                                    📋 外注者エクセルを出力する（給与計算付き）
+                                </button>
+                            )}
                         </div>
                     </div>
 
@@ -893,12 +1121,30 @@
                         </div>
 
                         <div className="bg-surface rounded-xl border border-primary/20 overflow-hidden">
-                            <ul className="divide-y divide-primary/10 max-h-64 overflow-y-auto w-full">
+                            <ul className="divide-y divide-primary/10 max-h-96 overflow-y-auto w-full">
                                 {staffList.map(staff => (
-                                    <li key={staff.name} className="p-3 flex justify-between items-center bg-white transition-colors grid grid-cols-12 gap-2">
-                                        <span className="font-bold text-primary text-lg col-span-6">{staff.name}</span>
-                                        <div className="col-span-4 flex justify-center"><button onClick={() => toggleMealSetting(staff.name)} className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${staff.defaultMeal ? 'bg-secondary text-white' : 'bg-gray-200 text-gray-500'}`}>{staff.defaultMeal ? '賄いあり' : '賄いなし'}</button></div>
-                                        <div className="col-span-2 flex justify-center"><button onClick={() => handleRemoveStaff(staff.name)} className="text-white hover:bg-red-700 bg-red-600 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors whitespace-nowrap">削除</button></div>
+                                    <li key={staff.name} className="bg-white transition-colors">
+                                        <div className="p-3 flex items-center gap-2">
+                                            <span className="font-bold text-primary text-base flex-1 truncate">{staff.name}</span>
+                                            <button onClick={() => toggleMealSetting(staff.name)} className={`px-3 py-1 rounded-full text-xs font-bold transition-colors whitespace-nowrap ${staff.defaultMeal ? 'bg-secondary text-white' : 'bg-gray-200 text-gray-500'}`}>{staff.defaultMeal ? '賄いあり' : '賄いなし'}</button>
+                                            <button onClick={() => toggleOutsourced(staff.name)} className={`px-3 py-1 rounded-full text-xs font-bold transition-colors whitespace-nowrap border-2 ${staff.isOutsourced ? 'bg-orange-500 text-white border-orange-500' : 'bg-white text-gray-400 border-gray-300'}`}>外注者</button>
+                                            <button onClick={() => handleRemoveStaff(staff.name)} className="text-white hover:bg-red-700 bg-red-600 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors whitespace-nowrap">削除</button>
+                                        </div>
+                                        {staff.isOutsourced && (
+                                            <div className="px-4 pb-3 flex flex-wrap gap-3 items-center border-t border-orange-100 bg-orange-50">
+                                                <span className="text-xs font-bold text-orange-700 mt-2">💼 外注者設定</span>
+                                                <div className="flex items-center gap-1 mt-2">
+                                                    <label className="text-xs font-bold text-orange-700 whitespace-nowrap">時給</label>
+                                                    <input type="number" min="0" value={staff.hourlyRate ?? 1200} onChange={(e) => updateHourlyRate(staff.name, e.target.value)} className="w-20 border-2 border-orange-300 rounded-lg p-1 text-sm text-right focus:border-orange-500 focus:outline-none bg-white" />
+                                                    <span className="text-xs text-gray-600">円</span>
+                                                </div>
+                                                <div className="flex items-center gap-1 mt-2">
+                                                    <label className="text-xs font-bold text-orange-700 whitespace-nowrap">交通費(1日)</label>
+                                                    <input type="number" min="0" value={staff.dailyTransport ?? 0} onChange={(e) => updateDailyTransport(staff.name, e.target.value)} className="w-20 border-2 border-orange-300 rounded-lg p-1 text-sm text-right focus:border-orange-500 focus:outline-none bg-white" />
+                                                    <span className="text-xs text-gray-600">円</span>
+                                                </div>
+                                            </div>
+                                        )}
                                     </li>
                                 ))}
                             </ul>

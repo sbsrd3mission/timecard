@@ -125,6 +125,19 @@
                 }
             };
 
+            // GASからの削除関数
+            const deleteFromGAS = async (recordId) => {
+                if (!gasUrl) return;
+                try {
+                    await fetch(gasUrl, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'text/plain' },
+                        body: JSON.stringify({ action: 'delete', id: recordId })
+                    });
+                } catch(e) { console.error('Delete failed', e); }
+            };
+
             // 未送信データの再送信
             const retrySendPending = async (url) => {
                 const targetUrl = url || gasUrl;
@@ -216,7 +229,7 @@
                 }
             }, [gasUrl]);
 
-            return { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, syncFromGAS, syncStatus };
+            return { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, syncStatus };
         };
 
         const calculateDuration = (start, end) => {
@@ -391,7 +404,7 @@
         };
 
         // --- カレンダー・履歴マネージャー ---
-        const MonthlyTimeEditor = ({ staffName, isAdmin, timeRecords, setTimeRecords, onBack }) => {
+        const MonthlyTimeEditor = ({ staffName, isAdmin, timeRecords, setTimeRecords, sendToGAS, deleteFromGAS, onBack }) => {
             const [selectedMonth, setSelectedMonth] = useState(() => {
                 const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
             });
@@ -406,8 +419,10 @@
                 const recordId = editModalData.recordId;
                 if (newRecord === null) {
                     setTimeRecords(prev => prev.filter(r => r.id !== recordId));
+                    if (deleteFromGAS) deleteFromGAS(recordId);
                 } else {
                     setTimeRecords(prev => [...prev.filter(r => r.id !== recordId), newRecord]);
+                    if (sendToGAS) sendToGAS(newRecord);
                 }
                 setEditModalData(null);
             };
@@ -871,7 +886,7 @@
 
         // --- メインアプリ ---
         const App = () => {
-            const { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, syncFromGAS, syncStatus } = useAppData();
+            const { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, syncStatus } = useAppData();
             const [view, setView] = useState('punch'); 
             
             const [selectedStaffName, setSelectedStaffName] = useState('');
@@ -1138,6 +1153,8 @@
                                 isAdmin={historyIsAdminMode}
                                 timeRecords={timeRecords}
                                 setTimeRecords={setTimeRecords}
+                                sendToGAS={sendToGAS}
+                                deleteFromGAS={deleteFromGAS}
                                 onBack={() => changeView(historyIsAdminMode ? 'admin' : 'punch')}
                             />
                         )}

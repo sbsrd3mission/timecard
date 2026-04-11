@@ -198,7 +198,7 @@
                     syncFromGAS(gasUrl, true);
                     const intervalId = setInterval(() => {
                         syncFromGAS(gasUrl, true);
-                    }, 15000); // 15秒ごとに自動同期
+                    }, 3000); // 3秒ごとに自動同期して他端末のラグを最小化
 
                     // 画面にフォーカスが戻ったときに即座に同期
                     const handleFocus = () => syncFromGAS(gasUrl, true);
@@ -1042,6 +1042,16 @@
                 }
             }
 
+            // 同期通信中の場合は一時的に操作を無効化してステータスを表示
+            if (selectedStaffName && syncStatus && syncStatus.state === 'loading') {
+                currentStatus = '⏳ 最新データを取得中...';
+                statusStyle = 'text-blue-600 bg-blue-50 border-blue-200 font-bold animate-pulse shadow-sm';
+                canClockIn = false;
+                canClockOut = false;
+                canBreakIn = false;
+                canBreakOut = false;
+            }
+
             return (
                 <div className="min-h-screen flex flex-col items-center py-6 px-4">
                     <div className="w-full max-w-lg mb-6 flex flex-col items-center">
@@ -1073,7 +1083,7 @@
                                         <select value={selectedStaffName} onChange={(e) => {
                                             const newName = e.target.value;
                                             setSelectedStaffName(newName);
-                                            if (newName && gasUrl) syncFromGAS(gasUrl, true);
+                                            if (newName && gasUrl) syncFromGAS(gasUrl, false);
                                         }} className="w-full appearance-none bg-white border-[3px] border-secondary/50 text-primary py-4 px-4 pr-10 rounded-2xl focus:border-secondary transition-all text-xl font-bold shadow-sm">
                                             <option value="">-- おなまえ --</option>
                                             {staffList.map(staff => <option key={staff.name} value={staff.name}>{staff.name}</option>)}

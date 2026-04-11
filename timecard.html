@@ -104,6 +104,7 @@
             // GASへの送信関数
             const sendToGAS = async (record) => {
                 if (!gasUrl) return;
+                localStorage.setItem('timecard_local_update_time', Date.now().toString());
                 try {
                     await fetch(gasUrl, {
                         method: 'POST',
@@ -128,6 +129,7 @@
             // GASからの削除関数
             const deleteFromGAS = async (recordId) => {
                 if (!gasUrl) return;
+                localStorage.setItem('timecard_local_update_time', Date.now().toString());
                 try {
                     await fetch(gasUrl, {
                         method: 'POST',
@@ -159,6 +161,13 @@
             const syncFromGAS = async (url, silent) => {
                 const targetUrl = url || gasUrl;
                 if (!targetUrl) return { success: false, message: 'GAS URLが未設定です' };
+
+                // ローカル更新直後は、クラウド側での処理が終わる前に古いデータが降ってくるのを避けるため、5秒間同期をスキップする（Race Condition対策）
+                const lastUpdate = parseInt(localStorage.getItem('timecard_local_update_time') || '0');
+                if (Date.now() - lastUpdate < 5000) {
+                    return { success: true, count: 0, merged: [], message: 'ローカル更新直後のためスキップ' };
+                }
+
                 if (!silent) setSyncStatus(s => ({ ...s, state: 'loading', message: '同期中...' }));
                 try {
                     const response = await fetch(targetUrl + '?action=getAll', { method: 'GET' });

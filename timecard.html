@@ -958,8 +958,10 @@
                     if (type === 'break_in' && !updated.breakStart) updated.breakStart = timeStr;
                     if (type === 'break_out' && !updated.breakEnd) updated.breakEnd = timeStr;
                     
+                    // どの打刻時でも現在の賄いチェック状態を保存する
+                    updated.meal = hasMeal;
+
                     if (type === 'out' || type === 'update_info') {
-                        updated.meal = hasMeal;
                         if (remarks) updated.remarks = updated.remarks ? updated.remarks + ' / ' + remarks : remarks;
                         if (additionalBreakPromptMins > 0) updated.additionalBreakMins = additionalBreakPromptMins;
                     }

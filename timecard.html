@@ -213,9 +213,6 @@
                         return merged;
                     });
 
-                    const now = new Date().toLocaleString('ja-JP');
-                    localStorage.setItem('timecard_last_sync', now);
-                    setSyncStatus({ state: 'success', message: '同期完了', lastSync: now });
 
                     // 同期後にローカルの未送信データも送る
                     await retrySendPending(targetUrl);

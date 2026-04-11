@@ -168,9 +168,9 @@
                 const targetUrl = url || gasUrl;
                 if (!targetUrl) return { success: false, message: 'GAS URLが未設定です' };
 
-                // ローカル更新直後は、クラウド側での処理が終わる前に古いデータが降ってくるのを避けるため、5秒間同期をスキップする（Race Condition対策）
+                // ローカル更新直後は、クラウド側での処理が終わる前に古いデータが降ってくるのを避けるため、8秒間同期をスキップする（Race Condition対策）
                 const lastUpdate = parseInt(localStorage.getItem('timecard_local_update_time') || '0');
-                if (Date.now() - lastUpdate < 5000) {
+                if (Date.now() - lastUpdate < 8000) {
                     return { success: true, count: 0, merged: [], message: 'ローカル更新直後のためスキップ' };
                 }
 
@@ -180,6 +180,13 @@
                     if (!response.ok) throw new Error('HTTP ' + response.status);
                     const data = await response.json();
                     if (data.status !== 'ok') throw new Error(data.message || '不明なエラー');
+
+                    // 通信待機中（数秒間）にローカルで取消や修正の操作が行われた場合、ここで取得したデータは既に古いもの（亡霊）になっています。
+                    // その古いデータが画面を上書きして復活させるのを完全に防ぐため、ここでもう一度ロックタイマーを確認します。
+                    const checkLastUpdate = parseInt(localStorage.getItem('timecard_local_update_time') || '0');
+                    if (Date.now() - checkLastUpdate < 8000) {
+                        return { success: true, count: 0, merged: [], message: '通信中にローカル更新が起きたため、古いデータの反映をブロックしました' };
+                    }
 
                     const gasRecords = data.records || [];
                     if (gasRecords.length === 0) {

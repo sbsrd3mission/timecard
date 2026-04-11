@@ -832,193 +832,176 @@
                     const year = parseInt(yearStr);
                     const month = parseInt(monthStr);
                     const daysInMonth = new Date(year, month, 0).getDate();
-                    const DAYS_JP = ['日', '月', '火', '水', '木', '金', '土'];
-                    const TIME_FMT = 'h:mm';
-                    const HOUR_FMT = '[h]:mm';
 
-                    const timeToFrac = (t) => {
-                        if (!t) return null;
-                        const [h, m, s] = t.split(':').map(Number);
-                        return ((h || 0) * 3600 + (m || 0) * 60 + (s || 0)) / 86400;
+                    // ===== 通常テンプレートと同じ処理でロード =====
+                    const timeToExcelFraction = (timeStr) => {
+                        if (!timeStr) return null;
+                        const parts = timeStr.split(':');
+                        const h = parseInt(parts[0], 10) || 0;
+                        const m = parseInt(parts[1], 10) || 0;
+                        const s = parseInt(parts[2], 10) || 0;
+                        return (h * 3600 + m * 60 + s) / 86400;
                     };
 
                     const workbook = new ExcelJS.Workbook();
+                    const b64 = EXCEL_TEMPLATE_B64;
+                    const binaryStr = atob(b64);
+                    const bytes = new Uint8Array(binaryStr.length);
+                    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+                    await workbook.xlsx.load(bytes.buffer);
 
-                    outsourcedStaff.forEach(staff => {
-                        const ws = workbook.addWorksheet(staff.name);
-                        const hourlyRate = staff.hourlyRate || 1200;
-                        const dailyTransport = staff.dailyTransport || 0;
+                    // ステップ1: 全シートの日付・曜日を対象月に更新（通常出力と同じ）
+                    const findStartRow = (ws) => {
+                        let startRow = -1;
+                        ws.eachRow((row, rowNumber) => {
+                            if (startRow !== -1) return;
+                            let isHeader = false;
+                            row.eachCell((cell) => {
+                                const v = cell.value;
+                                if (typeof v === 'string' && (v.includes('出勤') || v.includes('曜日') || v.includes('退勤'))) isHeader = true;
+                            });
+                            if (isHeader) startRow = rowNumber + 1;
+                        });
+                        if (startRow === -1) {
+                            ws.eachRow((row, rowNumber) => {
+                                if (startRow !== -1) return;
+                                const cellA = row.getCell(1).value;
+                                if (cellA instanceof Date || (typeof cellA === 'number' && cellA > 40000)) startRow = rowNumber;
+                            });
+                        }
+                        return startRow;
+                    };
 
-                        ws.columns = [
-                            { width: 11 }, { width: 5.1 }, { width: 8.1 }, { width: 6 },
-                            { width: 8.9 }, { width: 6 }, { width: 6 }, { width: 6.4 },
-                            { width: 5.1 }, { width: 3.1 }, { width: 8 }, { width: 7.1 },
-                            { width: 10 }, { width: 9.1 }, { width: 9.1 }, { width: 4.5 }, { width: 20 }
-                        ];
-
-                        // タイトル行（スタッフ名・対象年月）
-                        ws.getRow(1).getCell(1).value = `${staff.name}　${year}年${month}月分　外注タイムカード`;
-                        ws.getRow(1).getCell(1).font = { bold: true, size: 13 };
-
-                        // ヘッダー行
-                        const hdrs = ['日付','曜日','土日祝','出勤','休憩開始','休憩終了','退勤','賄い','日数','','勤務時間','休憩控除','計算時間','8時間超','深夜時間','','備考'];
-                        hdrs.forEach((h, i) => { ws.getRow(2).getCell(i + 1).value = h; });
-                        ws.getRow(2).font = { bold: true };
-                        ws.getRow(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F5E9' } };
-
-                        let totalMeal = 0, totalDays = 0;
-                        let totalWorkFrac = 0, totalCalcFrac = 0, totalOvertimeFrac = 0, totalLateNightFrac = 0;
-                        let weekdayCalcFrac = 0, holidayCalcFrac = 0;
-
+                    workbook.eachSheet((ws) => {
+                        const startRow = findStartRow(ws);
+                        if (startRow === -1) return;
                         for (let d = 1; d <= 31; d++) {
-                            const rowNum = d + 2; // データは3行目から
-                            const row = ws.getRow(rowNum);
-                            if (d > daysInMonth) continue;
+                            const row = ws.getRow(startRow + d - 1);
+                            [1,2,3,4,5,6,7,16].forEach(c => { row.getCell(c).value = null; });
+                            if (d <= daysInMonth) {
+                                const targetDateObj = new Date(year, month - 1, d);
+                                const dateVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
+                                row.getCell(1).value = dateVal;
+                                row.getCell(1).numFmt = 'yyyy/m/d';
+                                row.getCell(2).value = ['日','月','火','水','木','金','土'][targetDateObj.getDay()];
+                            }
+                        }
+                    });
 
-                            const dateVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
-                            const dow = new Date(year, month - 1, d).getDay();
-                            const isWeekend = dow === 0 || dow === 6;
+                    // ステップ2: 外注者のデータを書き込み（賄いは書かない）
+                    const outsourcedPayData = {};
+                    outsourcedStaff.forEach(staff => {
+                        const ws = workbook.getWorksheet(staff.name);
+                        if (!ws) return;
 
-                            row.getCell(1).value = dateVal;
-                            row.getCell(1).numFmt = 'yyyy/m/d';
-                            row.getCell(2).value = DAYS_JP[dow];
-                            row.getCell(3).value = isWeekend ? '土日祝' : '平日';
+                        const startRow = findStartRow(ws);
+                        if (startRow === -1) return;
 
-                            // 土日は背景色
-                            if (dow === 0) { [1,2,3].forEach(c => row.getCell(c).fill = { type:'pattern', pattern:'solid', fgColor:{argb:'FFFFF0F0'} }); }
-                            else if (dow === 6) { [1,2,3].forEach(c => row.getCell(c).fill = { type:'pattern', pattern:'solid', fgColor:{argb:'FFF0F0FF'} }); }
+                        let totalDays = 0, totalCalcFrac = 0;
 
-                            const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-                            const record = timeRecords.find(r => r.id === `${staff.name}_${dateStr}`);
+                        for (let d = 1; d <= daysInMonth; d++) {
+                            const row = ws.getRow(startRow + d - 1);
+                            const dateStrShort = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+                            const record = timeRecords.find(r => r.id === `${staff.name}_${dateStrShort}`);
+                            if (!record) continue;
 
-                            if (record && !record.isPaidLeave && record.clockIn && record.clockOut) {
-                                const ci = timeToFrac(record.clockIn);
-                                const co = timeToFrac(record.clockOut);
-                                let bs = timeToFrac(record.breakStart);
-                                let be = timeToFrac(record.breakEnd);
+                            if (record.isPaidLeave) {
+                                row.getCell(16).value = '【有給申請】 ' + (record.remarks || '');
+                            } else {
+                                row.getCell(3).value = timeToExcelFraction(record.clockIn);
+                                row.getCell(6).value = timeToExcelFraction(record.clockOut);
+                                // 賄い（col 7）は外注者なので書かない
 
-                                if (record.additionalBreakMins > 0 && !bs && !be) {
-                                    bs = timeToFrac('12:00:00');
-                                    const eh = 12 + Math.floor(record.additionalBreakMins / 60);
-                                    const em = record.additionalBreakMins % 60;
-                                    be = timeToFrac(`${String(eh).padStart(2,'0')}:${String(em).padStart(2,'0')}:00`);
+                                let remarks = record.remarks || '';
+                                if (record.additionalBreakMins > 0) {
+                                    if (!record.breakStart && !record.breakEnd) {
+                                        row.getCell(4).value = timeToExcelFraction('12:00:00');
+                                        const endH = 12 + Math.floor(record.additionalBreakMins / 60);
+                                        const endM = record.additionalBreakMins % 60;
+                                        row.getCell(5).value = timeToExcelFraction(`${String(endH).padStart(2,'0')}:${String(endM).padStart(2,'0')}:00`);
+                                    } else {
+                                        row.getCell(4).value = timeToExcelFraction(record.breakStart);
+                                        row.getCell(5).value = timeToExcelFraction(record.breakEnd);
+                                        remarks += (remarks ? ' / ' : '') + `追加個別休憩：${record.additionalBreakMins}分`;
+                                    }
+                                } else {
+                                    row.getCell(4).value = timeToExcelFraction(record.breakStart);
+                                    row.getCell(5).value = timeToExcelFraction(record.breakEnd);
                                 }
+                                row.getCell(16).value = remarks || null;
 
-                                row.getCell(4).value = ci; row.getCell(4).numFmt = TIME_FMT;
-                                if (bs != null) { row.getCell(5).value = bs; row.getCell(5).numFmt = TIME_FMT; }
-                                if (be != null) { row.getCell(6).value = be; row.getCell(6).numFmt = TIME_FMT; }
-                                row.getCell(7).value = co; row.getCell(7).numFmt = TIME_FMT;
-                                if (record.meal) { row.getCell(8).value = 1; totalMeal++; }
-
-                                let workFrac = co - ci;
-                                if (workFrac < 0) workFrac += 1; // 日跨ぎ対応
-                                if (bs != null && be != null) workFrac -= (be - bs);
-                                if (workFrac < 0) workFrac = 0;
-
-                                // 休憩控除：6時間超なら30分
-                                const breakDeduct = workFrac > (6 / 24) ? (30 / 1440) : 0;
-                                const calcFrac = Math.max(0, workFrac - breakDeduct);
-                                const overtimeFrac = calcFrac > (8 / 24) ? calcFrac - (8 / 24) : 0;
-
-                                // 深夜時間（22時以降・5時以前）
-                                const fiveAM = 5 / 24, tenPM = 22 / 24;
-                                let lateNight = 0;
-                                if (ci < fiveAM) lateNight += fiveAM - ci;
-                                if (co > tenPM) lateNight += co - tenPM;
-
-                                row.getCell(9).value = 1;
-                                row.getCell(11).value = workFrac; row.getCell(11).numFmt = HOUR_FMT;
-                                row.getCell(12).value = breakDeduct; row.getCell(12).numFmt = HOUR_FMT;
-                                row.getCell(13).value = calcFrac; row.getCell(13).numFmt = HOUR_FMT;
-                                if (overtimeFrac > 0) { row.getCell(14).value = overtimeFrac; row.getCell(14).numFmt = HOUR_FMT; }
-                                if (lateNight > 0) { row.getCell(15).value = lateNight; row.getCell(15).numFmt = HOUR_FMT; }
-                                if (record.remarks) row.getCell(17).value = record.remarks;
-
-                                totalDays++;
-                                totalWorkFrac += workFrac;
-                                totalCalcFrac += calcFrac;
-                                totalOvertimeFrac += overtimeFrac;
-                                totalLateNightFrac += lateNight;
-                                if (isWeekend) holidayCalcFrac += calcFrac;
-                                else weekdayCalcFrac += calcFrac;
-
-                            } else if (record?.isPaidLeave) {
-                                row.getCell(17).value = '【有給申請】 ' + (record.remarks || '');
+                                if (record.clockIn && record.clockOut) {
+                                    const ci = timeToExcelFraction(record.clockIn);
+                                    const co = timeToExcelFraction(record.clockOut);
+                                    const bs = timeToExcelFraction(record.breakStart);
+                                    const be = timeToExcelFraction(record.breakEnd);
+                                    let workFrac = co - ci;
+                                    if (workFrac < 0) workFrac += 1;
+                                    if (bs && be) workFrac -= (be - bs);
+                                    const breakDeduct = workFrac > (6 / 24) ? (30 / 1440) : 0;
+                                    totalCalcFrac += Math.max(0, workFrac - breakDeduct);
+                                    totalDays++;
+                                }
                             }
                         }
 
-                        // 集計ラベル行（35行目）
-                        const subRow = ws.getRow(35);
-                        ['回数','日数','','','勤務時間','休憩控除','計算時間','8時間超','深夜時間'].forEach((v, i) => {
-                            if (v) subRow.getCell([8,9,10,10,11,12,13,14,15][i]).value = v;
-                        });
-                        subRow.font = { bold: true };
-                        subRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9C4' } };
-
-                        // 合計行（36行目）
-                        const totRow = ws.getRow(36);
-                        totRow.getCell(5).value = '合計';
-                        totRow.getCell(8).value = totalMeal;
-                        totRow.getCell(9).value = totalDays;
-                        totRow.getCell(11).value = totalWorkFrac; totRow.getCell(11).numFmt = HOUR_FMT;
-                        totRow.getCell(13).value = totalCalcFrac; totRow.getCell(13).numFmt = HOUR_FMT;
-                        totRow.getCell(14).value = totalOvertimeFrac; totRow.getCell(14).numFmt = HOUR_FMT;
-                        totRow.getCell(15).value = totalLateNightFrac; totRow.getCell(15).numFmt = HOUR_FMT;
-                        totRow.font = { bold: true };
-                        totRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F5E9' } };
-
-                        // 給与計算ブロック（38〜44行目）
-                        const weekdayH = Math.round(weekdayCalcFrac * 24 * 100) / 100;
-                        const holidayH = Math.round(holidayCalcFrac * 24 * 100) / 100;
+                        // 給与計算ブロックをデータ行の下に追加
+                        const hourlyRate = staff.hourlyRate || 1200;
+                        const dailyTransport = staff.dailyTransport || 0;
                         const totalH = Math.round(totalCalcFrac * 24 * 100) / 100;
                         const remuneration = Math.round(totalH * hourlyRate);
                         const transportTotal = dailyTransport * totalDays;
-                        const mealCost = totalMeal * 300;
-                        const totalBill = remuneration + transportTotal + mealCost;
-
-                        // 時間内訳ヘッダー
-                        const ph = ws.getRow(38);
-                        ph.getCell(11).value = '平日(h)'; ph.getCell(12).value = '土日祝(h)'; ph.getCell(13).value = '合計(h)';
-                        ph.font = { bold: true };
-
-                        ws.getRow(39).getCell(11).value = weekdayH;
-                        ws.getRow(39).getCell(12).value = holidayH;
-                        ws.getRow(39).getCell(13).value = totalH;
-                        ws.getRow(39).font = { bold: true };
-
-                        // 給与明細
-                        const calcStyle = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF3E0' } };
-                        ws.getRow(38).fill = calcStyle;
+                        const totalBill = remuneration + transportTotal;
+                        const moneyFmt = '#,##0"円"';
+                        const blockStart = startRow + 33; // データ31行＋バッファ
 
                         const labelFont = { bold: true };
-                        const moneyFmt = '#,##0"円"';
+                        const bgPay = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF3E0' } };
+                        const bgBill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE4EC' } };
 
-                        ws.getRow(41).getCell(5).value = '時給'; ws.getRow(41).getCell(5).font = labelFont;
-                        ws.getRow(41).getCell(6).value = hourlyRate; ws.getRow(41).getCell(6).numFmt = moneyFmt;
+                        const setPayRow = (offset, label, value, fmt, note, isBig) => {
+                            const r = ws.getRow(blockStart + offset);
+                            r.getCell(3).value = label; r.getCell(3).font = labelFont; r.getCell(3).fill = bgPay;
+                            r.getCell(4).value = value;
+                            if (fmt) r.getCell(4).numFmt = fmt;
+                            if (isBig) r.getCell(4).font = { bold: true, size: 12 };
+                            r.getCell(4).fill = isBig ? bgBill : bgPay;
+                            if (note) { r.getCell(5).value = note; r.getCell(5).fill = bgPay; }
+                        };
 
-                        ws.getRow(42).getCell(5).value = '1日交通費'; ws.getRow(42).getCell(5).font = labelFont;
-                        ws.getRow(42).getCell(6).value = dailyTransport; ws.getRow(42).getCell(6).numFmt = moneyFmt;
+                        ws.getRow(blockStart).getCell(3).value = '【給与計算】';
+                        ws.getRow(blockStart).getCell(3).font = { bold: true, size: 11 };
+                        setPayRow(1, '勤務時間合計', totalH + ' 時間', null, `(${totalDays}日出勤)`, false);
+                        setPayRow(2, '時給', hourlyRate, moneyFmt, null, false);
+                        setPayRow(3, '1日交通費', dailyTransport, moneyFmt, null, false);
+                        setPayRow(4, '報酬', remuneration, moneyFmt, `${totalH}時間 × ${hourlyRate.toLocaleString()}円`, false);
+                        setPayRow(5, '交通費合計', transportTotal, moneyFmt, `${dailyTransport.toLocaleString()}円 × ${totalDays}日`, false);
+                        setPayRow(6, '請求合計', totalBill, moneyFmt, null, true);
 
-                        ws.getRow(43).getCell(5).value = '報酬'; ws.getRow(43).getCell(5).font = labelFont;
-                        ws.getRow(43).getCell(6).value = remuneration; ws.getRow(43).getCell(6).numFmt = moneyFmt;
-                        ws.getRow(43).getCell(7).value = `(${totalH}時間 × ${hourlyRate.toLocaleString()}円)`;
-
-                        ws.getRow(44).getCell(5).value = '交通費'; ws.getRow(44).getCell(5).font = labelFont;
-                        ws.getRow(44).getCell(6).value = transportTotal; ws.getRow(44).getCell(6).numFmt = moneyFmt;
-                        ws.getRow(44).getCell(7).value = `(${dailyTransport.toLocaleString()}円 × ${totalDays}日)`;
-
-                        ws.getRow(45).getCell(5).value = '賄い代'; ws.getRow(45).getCell(5).font = labelFont;
-                        ws.getRow(45).getCell(6).value = mealCost; ws.getRow(45).getCell(6).numFmt = moneyFmt;
-                        ws.getRow(45).getCell(7).value = `(300円 × ${totalMeal}回)`;
-
-                        const billRow = ws.getRow(47);
-                        billRow.getCell(5).value = '請求合計';
-                        billRow.getCell(5).font = { bold: true, size: 13 };
-                        billRow.getCell(6).value = totalBill;
-                        billRow.getCell(6).numFmt = moneyFmt;
-                        billRow.getCell(6).font = { bold: true, size: 13 };
-                        billRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE4EC' } };
+                        outsourcedPayData[staff.name] = true;
                     });
+
+                    // ステップ3: 外注者以外のシートを削除
+                    const outsourcedNames = new Set(outsourcedStaff.map(s => s.name));
+                    const sheetsToRemove = [];
+                    workbook.eachSheet((ws) => {
+                        if (ws.name === 'マスタ') return;
+                        if (!outsourcedNames.has(ws.name)) {
+                            sheetsToRemove.push(ws.name);
+                            return;
+                        }
+                        // 外注者でもデータがなければ削除
+                        if (!outsourcedPayData[ws.name]) sheetsToRemove.push(ws.name);
+                    });
+                    sheetsToRemove.forEach(name => {
+                        const ws = workbook.getWorksheet(name);
+                        if (ws) workbook.removeWorksheet(ws.id);
+                    });
+
+                    if (workbook.worksheets.length === 0) {
+                        alert('外注者のシートがテンプレート内に見つかりませんでした。\nスタッフ名がテンプレートのシート名と完全一致しているか確認してください。');
+                        return;
+                    }
 
                     const outBuffer = await workbook.xlsx.writeBuffer();
                     const blob = new Blob([outBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });

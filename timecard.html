@@ -189,28 +189,33 @@
                     }
 
                     const gasRecords = data.records || [];
-                    if (gasRecords.length === 0) {
-                        const now = new Date().toLocaleString('ja-JP');
-                        localStorage.setItem('timecard_last_sync', now);
-                        setSyncStatus({ state: 'success', message: 'GASにデータなし（正常）', lastSync: now });
-                        return { success: true, count: 0, merged: [] };
-                    }
+                    
+                    // 他端末で削除されたデータをローカルにも反映させるため、クラウドのデータを「正（マスター）」とする。
+                    // ただし、この端末でたった今打刻したばかりでGASに未送信のデータは消さないように保護する。
+                    const pending = JSON.parse(localStorage.getItem('timecard_pending_sync') || '[]');
+                    const pendingIds = pending.map(p => p.id);
 
-                    // ローカルとGASデータをマージ（IDで重複排除、GASデータを最新として採用）
                     let finalMerged = [];
                     setTimeRecords(prev => {
-                        const merged = [...prev];
-                        gasRecords.forEach(gasRec => {
-                            const idx = merged.findIndex(r => r.id === gasRec.id);
-                            if (idx >= 0) {
-                                merged[idx] = { ...gasRec }; // GASのデータで上書き
-                            } else {
-                                merged.push(gasRec); // なければ追加
+                        const merged = [...gasRecords]; // クラウドのデータをベースにする
+
+                        // この端末の未送信データを上乗せする
+                        prev.forEach(localRec => {
+                            if (pendingIds.includes(localRec.id)) {
+                                if (!merged.find(r => r.id === localRec.id)) {
+                                    merged.push(localRec);
+                                }
                             }
+                            // 未送信ではなく、クラウドにも無いローカルデータは、他端末で削除されたものなので切り捨てる
                         });
+                        
                         finalMerged = merged;
                         return merged;
                     });
+
+                    const now = new Date().toLocaleString('ja-JP');
+                    localStorage.setItem('timecard_last_sync', now);
+                    setSyncStatus({ state: 'success', message: '同期完了', lastSync: now });
 
                     // 同期後にローカルの未送信データも送る
                     await retrySendPending(targetUrl);

@@ -198,7 +198,7 @@
                     syncFromGAS(gasUrl, true);
                     const intervalId = setInterval(() => {
                         syncFromGAS(gasUrl, true);
-                    }, 60000); // 1分ごとに自動同期
+                    }, 15000); // 15秒ごとに自動同期
                     return () => clearInterval(intervalId);
                 }
             }, [gasUrl]);
@@ -882,20 +882,8 @@
                 }
             };
 
-            const handlePunch = async (type) => {
+            const handlePunch = (type) => {
                 if (!selectedStaffName) return;
-
-                // --- 追加：打刻直前に同期して最新状態を確認 ---
-                let latestRecords = timeRecords;
-                if (gasUrl) {
-                    try {
-                        const syncRes = await syncFromGAS(gasUrl, true);
-                        if (syncRes.success && syncRes.merged) {
-                            latestRecords = syncRes.merged;
-                        }
-                    } catch(e) { /* 同期失敗時は既存レコードで続行 */ }
-                }
-                // ----------------------------------------------
 
                 const now = new Date();
                 const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -903,7 +891,7 @@
                 const recordId = `${selectedStaffName}_${dateStr}`;
                 
                 let additionalBreakPromptMins = 0;
-                const existingRec = latestRecords.find(r => r.id === recordId);
+                const existingRec = timeRecords.find(r => r.id === recordId);
                 
                 if (existingRec?.isPaidLeave && type !== 'update_info') {
                     alert('本日すでに【有給】で申請されています！打刻する場合は、履歴画面から有給をキャンセルしてください。');
@@ -1015,6 +1003,30 @@
                 }
             }
 
+            // 各ボタンの有効無効判定
+            let canClockIn = false;
+            let canClockOut = false;
+            let canBreakIn = false;
+            let canBreakOut = false;
+
+            if (selectedStaffName && (!currentRecord || !currentRecord.isPaidLeave)) {
+                if (!currentRecord || !currentRecord.clockIn) {
+                    // 出勤前
+                    canClockIn = true;
+                } else if (currentRecord.clockIn && !currentRecord.clockOut) {
+                    if (currentRecord.breakStart && !currentRecord.breakEnd) {
+                        // 中抜け中
+                        canBreakOut = true;
+                    } else {
+                        // 出勤中 (中抜け開始前、または中抜け終了後)
+                        canClockOut = true;
+                        if (!currentRecord.breakStart) {
+                            canBreakIn = true;
+                        }
+                    }
+                }
+            }
+
             return (
                 <div className="min-h-screen flex flex-col items-center py-6 px-4">
                     <div className="w-full max-w-lg mb-6 flex flex-col items-center">
@@ -1043,7 +1055,11 @@
                                 
                                 <div className="mb-6 relative z-10 text-left">
                                     <div className="relative mb-3">
-                                        <select value={selectedStaffName} onChange={(e) => setSelectedStaffName(e.target.value)} className="w-full appearance-none bg-white border-[3px] border-secondary/50 text-primary py-4 px-4 pr-10 rounded-2xl focus:border-secondary transition-all text-xl font-bold shadow-sm">
+                                        <select value={selectedStaffName} onChange={(e) => {
+                                            const newName = e.target.value;
+                                            setSelectedStaffName(newName);
+                                            if (newName && gasUrl) syncFromGAS(gasUrl, true);
+                                        }} className="w-full appearance-none bg-white border-[3px] border-secondary/50 text-primary py-4 px-4 pr-10 rounded-2xl focus:border-secondary transition-all text-xl font-bold shadow-sm">
                                             <option value="">-- おなまえ --</option>
                                             {staffList.map(staff => <option key={staff.name} value={staff.name}>{staff.name}</option>)}
                                         </select>
@@ -1058,10 +1074,10 @@
 
                                     <div className="mb-6 text-left">
                                         <div className={`grid grid-cols-2 gap-3 ${currentRecord?.isPaidLeave ? 'opacity-30 pointer-events-none' : ''}`}>
-                                            <button onClick={() => handlePunch('in')} className="col-span-1 bg-gradient-to-br from-secondary to-[#65a30d] hover:brightness-110 text-white font-bold py-6 px-4 rounded-2xl shadow-md transition-all active:scale-95 text-2xl border-b-4 border-[#4d7c0f]">出勤</button>
-                                            <button onClick={() => handlePunch('out')} className="col-span-1 bg-gradient-to-br from-accent to-[#b45309] hover:brightness-110 text-white font-bold py-6 px-4 rounded-2xl shadow-md transition-all active:scale-95 text-2xl border-b-4 border-[#78350f]">退勤</button>
-                                            <button onClick={() => handlePunch('break_in')} className="col-span-1 bg-white hover:bg-gray-50 text-primary font-bold py-4 px-4 rounded-xl shadow-sm border-2 border-primary/20 transition-all active:scale-95 mt-2">中抜け開始</button>
-                                            <button onClick={() => handlePunch('break_out')} className="col-span-1 bg-white hover:bg-gray-50 text-primary font-bold py-4 px-4 rounded-xl shadow-sm border-2 border-primary/20 transition-all active:scale-95 mt-2">中抜け終了</button>
+                                            <button onClick={() => handlePunch('in')} disabled={!canClockIn} className={`col-span-1 font-bold py-6 px-4 rounded-2xl shadow-md transition-all text-2xl border-b-4 ${canClockIn ? 'bg-gradient-to-br from-secondary to-[#65a30d] hover:brightness-110 text-white active:scale-95 border-[#4d7c0f]' : 'bg-gray-300 text-gray-500 border-gray-400 cursor-not-allowed opacity-60'}`}>出勤</button>
+                                            <button onClick={() => handlePunch('out')} disabled={!canClockOut} className={`col-span-1 font-bold py-6 px-4 rounded-2xl shadow-md transition-all text-2xl border-b-4 ${canClockOut ? 'bg-gradient-to-br from-accent to-[#b45309] hover:brightness-110 text-white active:scale-95 border-[#78350f]' : 'bg-gray-300 text-gray-500 border-gray-400 cursor-not-allowed opacity-60'}`}>退勤</button>
+                                            <button onClick={() => handlePunch('break_in')} disabled={!canBreakIn} className={`col-span-1 font-bold py-4 px-4 rounded-xl shadow-sm border-2 transition-all mt-2 ${canBreakIn ? 'bg-white hover:bg-gray-50 text-primary border-primary/20 active:scale-95' : 'bg-gray-200 text-gray-400 border-gray-300 cursor-not-allowed opacity-60'}`}>中抜け開始</button>
+                                            <button onClick={() => handlePunch('break_out')} disabled={!canBreakOut} className={`col-span-1 font-bold py-4 px-4 rounded-xl shadow-sm border-2 transition-all mt-2 ${canBreakOut ? 'bg-white hover:bg-gray-50 text-primary border-primary/20 active:scale-95' : 'bg-gray-200 text-gray-400 border-gray-300 cursor-not-allowed opacity-60'}`}>中抜け終了</button>
                                         </div>
                                     </div>
 

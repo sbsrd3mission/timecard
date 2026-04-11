@@ -237,9 +237,11 @@ function writeRecord(ss, record) {
   // 既存の行を検索（日付が一致する行を探す）
   const lastRow = sheet.getLastRow();
   let targetRow = -1;
+  let existingData = null;
 
   if (lastRow >= 2) {
     const dates = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    const allData = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
     for (let i = 0; i < dates.length; i++) {
       const cellDate = dates[i][0];
       let cellDateStr = '';
@@ -250,6 +252,7 @@ function writeRecord(ss, record) {
       }
       if (cellDateStr === dateStr) {
         targetRow = i + 2;
+        existingData = allData[i];
         break;
       }
     }
@@ -264,17 +267,26 @@ function writeRecord(ss, record) {
   const dowNames = ['日', '月', '火', '水', '木', '金', '土'];
   const dow = dowNames[dateObj.getDay()];
 
-  // データを書き込み
+  // 既存の打刻データがあれば優先・補完するハイブリッドマージ
+  const existingClockIn = existingData ? formatTimeCell(existingData[2]) : '';
+  const existingBreakStart = existingData ? formatTimeCell(existingData[3]) : '';
+  const existingBreakEnd = existingData ? formatTimeCell(existingData[4]) : '';
+  const existingClockOut = existingData ? formatTimeCell(existingData[5]) : '';
+  const existingMeal = existingData && (existingData[6] === '有' || existingData[6] === 1);
+  const existingPaidLeave = existingData && existingData[7] === '有給';
+  const existingRemarks = existingData ? existingData[8] : '';
+
+  // データを書き込み (元のデータがあれば優先して引き継ぎ、新しいものを追加)
   const rowData = [
     dateStr,
     dow,
-    record.clockIn || '',
-    record.breakStart || '',
-    record.breakEnd || '',
-    record.clockOut || '',
-    record.meal ? '有' : '',
-    record.isPaidLeave ? '有給' : '',
-    record.remarks || '',
+    existingClockIn ? existingClockIn : (record.clockIn || ''),
+    existingBreakStart ? existingBreakStart : (record.breakStart || ''),
+    existingBreakEnd ? existingBreakEnd : (record.breakEnd || ''),
+    existingClockOut ? existingClockOut : (record.clockOut || ''),
+    (record.meal || existingMeal) ? '有' : '',
+    (record.isPaidLeave || existingPaidLeave) ? '有給' : '',
+    record.remarks || existingRemarks || '',
     new Date()
   ];
 

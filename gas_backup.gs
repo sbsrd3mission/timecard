@@ -193,7 +193,8 @@ function deleteRecord(ss, recordId) {
   if (lastRow < 2) return;
 
   const dates = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-  for (let i = 0; i < dates.length; i++) {
+  // 重複データが存在していても確実にすべて消すため、下（最後）から逆順でループして削除する
+  for (let i = dates.length - 1; i >= 0; i--) {
     const cellDate = dates[i][0];
     let cellDateStr = '';
     if (cellDate instanceof Date) {
@@ -203,7 +204,6 @@ function deleteRecord(ss, recordId) {
     }
     if (cellDateStr === dateStr) {
       sheet.deleteRow(i + 2);
-      return;
     }
   }
 }

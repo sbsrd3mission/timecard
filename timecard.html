@@ -130,6 +130,12 @@
             const deleteFromGAS = async (recordId) => {
                 if (!gasUrl) return;
                 localStorage.setItem('timecard_local_update_time', Date.now().toString());
+
+                // 未送信リストの残骸から削除（ゾンビ復活防止）
+                const pending = JSON.parse(localStorage.getItem('timecard_pending_sync') || '[]');
+                const updatedPending = pending.filter(p => p.id !== recordId);
+                localStorage.setItem('timecard_pending_sync', JSON.stringify(updatedPending));
+
                 try {
                     await fetch(gasUrl, {
                         method: 'POST',

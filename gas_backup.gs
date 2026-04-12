@@ -30,6 +30,11 @@ function doGet(e) {
       return getAllRecords();
     }
 
+    if (action === 'getSettings') {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      return createJsonResponse({ status: 'ok', settings: getSettings(ss) });
+    }
+
     // ping（接続テスト）
     return createJsonResponse({
       status: 'ok',
@@ -73,6 +78,12 @@ function doPost(e) {
       // レコードの削除（打刻取消）
       deleteRecord(ss, data.id);
       return createJsonResponse({ status: 'ok', message: 'データを削除しました' });
+    }
+
+    if (data.action === 'saveSettings') {
+      // 設定情報の保存（スタッフリスト、PINコード）
+      saveSettings(ss, data.settings);
+      return createJsonResponse({ status: 'ok', message: '設定を保存しました' });
     }
 
     return createJsonResponse({ status: 'error', message: '不明なアクションです' });
@@ -291,4 +302,43 @@ function writeRecord(ss, record) {
   ];
 
   sheet.getRange(targetRow, 1, 1, 10).setValues([rowData]);
+}
+
+// ===== 設定情報の操作 =====
+const SETTINGS_SHEET_NAME = 'AppSettings';
+
+function getSettings(ss) {
+  let sheet = ss.getSheetByName(SETTINGS_SHEET_NAME);
+  if (!sheet || sheet.getLastRow() === 0) {
+    return null; // まだ設定がない場合
+  }
+  const lastRow = sheet.getLastRow();
+  const data = sheet.getRange(1, 1, lastRow, 2).getValues();
+  let settings = {};
+  data.forEach(row => {
+    if (row[0] === 'staffList') {
+      try {
+        settings.staffList = JSON.parse(row[1]);
+      } catch(e) { settings.staffList = []; }
+    }
+    if (row[0] === 'adminPin') settings.adminPin = row[1].toString();
+  });
+  return settings;
+}
+
+function saveSettings(ss, settings) {
+  let sheet = ss.getSheetByName(SETTINGS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SETTINGS_SHEET_NAME);
+    sheet.setTabColor('#ff9800');
+  }
+  sheet.clear();
+  const rows = [];
+  if (settings.staffList) rows.push(['staffList', JSON.stringify(settings.staffList)]);
+  if (settings.adminPin) rows.push(['adminPin', settings.adminPin]);
+  rows.push(['updatedAt', new Date()]);
+
+  if (rows.length > 0) {
+    sheet.getRange(1, 1, rows.length, 2).setValues(rows);
+  }
 }

@@ -105,6 +105,40 @@
             useEffect(() => { localStorage.setItem('admin_pin', adminPin); }, [adminPin]);
             useEffect(() => { localStorage.setItem('timecard_gas_url', gasUrl); }, [gasUrl]);
 
+            // ===== 設定の同期（スタッフリスト、PINコード） =====
+            const saveSettingsToGAS = async (newList, newPin) => {
+                if (!gasUrl) return;
+                try {
+                    await fetch(gasUrl, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'text/plain' },
+                        body: JSON.stringify({ 
+                            action: 'saveSettings', 
+                            settings: { 
+                                staffList: newList || staffList, 
+                                adminPin: newPin || adminPin 
+                            } 
+                        })
+                    });
+                } catch(e) { console.error('Save settings failed', e); }
+            };
+
+            const syncSettingsFromGAS = async (url) => {
+                const targetUrl = url || gasUrl;
+                if (!targetUrl) return;
+                try {
+                    const response = await fetch(targetUrl + '?action=getSettings', { method: 'GET' });
+                    if (!response.ok) return;
+                    const data = await response.json();
+                    if (data.status === 'ok' && data.settings) {
+                        if (data.settings.staffList) setStaffList(data.settings.staffList);
+                        if (data.settings.adminPin) setAdminPin(data.settings.adminPin);
+                        console.log('Settings synced from GAS');
+                    }
+                } catch(e) { console.error('Sync settings failed', e); }
+            };
+
             // GASへの送信関数
             const sendToGAS = async (record) => {
                 if (!gasUrl) return;
@@ -237,14 +271,16 @@
             useEffect(() => {
                 if (gasUrl) {
                     syncFromGAS(gasUrl, true);
+                    syncSettingsFromGAS(gasUrl); // 設定情報の同期
+
                     const intervalId = setInterval(() => {
                         syncFromGAS(gasUrl, true);
                     }, 3000); // 3秒ごとに自動同期して他端末のラグを最小化
 
                     // 画面にフォーカスが戻ったときに即座に同期
-                    const handleFocus = () => syncFromGAS(gasUrl, true);
+                    const handleFocus = () => { syncFromGAS(gasUrl, true); syncSettingsFromGAS(gasUrl); };
                     const handleVisibility = () => {
-                        if (document.visibilityState === 'visible') syncFromGAS(gasUrl, true);
+                        if (document.visibilityState === 'visible') { syncFromGAS(gasUrl, true); syncSettingsFromGAS(gasUrl); }
                     };
                     window.addEventListener('focus', handleFocus);
                     document.addEventListener('visibilitychange', handleVisibility);
@@ -257,7 +293,7 @@
                 }
             }, [gasUrl]);
 
-            return { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, syncStatus };
+            return { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, saveSettingsToGAS, syncSettingsFromGAS, syncStatus };
         };
 
         const calculateDuration = (start, end) => {
@@ -605,7 +641,7 @@
             timeRecords, setTimeRecords, 
             adminPin, setAdminPin,
             gasUrl, setGasUrl,
-            syncFromGAS, syncStatus,
+            syncFromGAS, saveSettingsToGAS, syncStatus,
             openAdminHistoryView 
         }) => {
             const [targetMonth, setTargetMonth] = useState(() => {
@@ -616,20 +652,40 @@
 
             const handleAddStaff = () => {
                 if (newStaffName && !staffList.find(s => s.name === newStaffName)) {
-                    setStaffList([...staffList, { name: newStaffName, defaultMeal: true, isOutsourced: false, hourlyRate: 1200, dailyTransport: 0 }]);
+                    const newList = [...staffList, { name: newStaffName, defaultMeal: true, isOutsourced: false, hourlyRate: 1200, dailyTransport: 0 }];
+                    setStaffList(newList);
+                    saveSettingsToGAS(newList, adminPin);
                     setNewStaffName('');
                 } else if(staffList.find(s => s.name === newStaffName)) {
                     alert('すでに同じ名前のスタッフがいます。');
                 }
             };
 
-            const toggleMealSetting = (name) => setStaffList(staffList.map(s => s.name === name ? { ...s, defaultMeal: !s.defaultMeal } : s));
-            const toggleOutsourced = (name) => setStaffList(staffList.map(s => s.name === name ? { ...s, isOutsourced: !s.isOutsourced } : s));
-            const updateHourlyRate = (name, val) => setStaffList(staffList.map(s => s.name === name ? { ...s, hourlyRate: parseInt(val) || 0 } : s));
-            const updateDailyTransport = (name, val) => setStaffList(staffList.map(s => s.name === name ? { ...s, dailyTransport: parseInt(val) || 0 } : s));
+            const toggleMealSetting = (name) => {
+                const newList = staffList.map(s => s.name === name ? { ...s, defaultMeal: !s.defaultMeal } : s);
+                setStaffList(newList);
+                saveSettingsToGAS(newList, adminPin);
+            };
+            const toggleOutsourced = (name) => {
+                const newList = staffList.map(s => s.name === name ? { ...s, isOutsourced: !s.isOutsourced } : s);
+                setStaffList(newList);
+                saveSettingsToGAS(newList, adminPin);
+            };
+            const updateHourlyRate = (name, val) => {
+                const newList = staffList.map(s => s.name === name ? { ...s, hourlyRate: parseInt(val) || 0 } : s);
+                setStaffList(newList);
+                saveSettingsToGAS(newList, adminPin);
+            };
+            const updateDailyTransport = (name, val) => {
+                const newList = staffList.map(s => s.name === name ? { ...s, dailyTransport: parseInt(val) || 0 } : s);
+                setStaffList(newList);
+                saveSettingsToGAS(newList, adminPin);
+            };
             const handleRemoveStaff = (name) => {
                 if (window.confirm(`${name}さんを削除しますか？\n（過去の打刻データは消えませんが、プルダウンに表示されなくなります）`)) {
-                    setStaffList(staffList.filter(s => s.name !== name));
+                    const newList = staffList.filter(s => s.name !== name);
+                    setStaffList(newList);
+                    saveSettingsToGAS(newList, adminPin);
                 }
             };
             
@@ -640,6 +696,7 @@
                         alert("パスワードは4桁の半角数字で入力してください。");
                     } else {
                         setAdminPin(newPin);
+                        saveSettingsToGAS(staffList, newPin);
                         alert(`パスワードを ${newPin} に変更しました。`);
                     }
                 }
@@ -1395,7 +1452,9 @@
                                 timeRecords={timeRecords} setTimeRecords={setTimeRecords} 
                                 adminPin={adminPin} setAdminPin={setAdminPin}
                                 gasUrl={gasUrl} setGasUrl={setGasUrl}
-                                syncFromGAS={syncFromGAS} syncStatus={syncStatus}
+                                syncFromGAS={syncFromGAS} 
+                                saveSettingsToGAS={saveSettingsToGAS}
+                                syncStatus={syncStatus}
                                 openAdminHistoryView={(name) => { setHistoryStaffName(name); setHistoryIsAdminMode(true); changeView('history'); }}
                             />
                         )}

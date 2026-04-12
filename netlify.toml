@@ -1,6 +1,13 @@
 [build]
   publish = "."
 
+# mainブランチへのpushのみ本番デプロイ（devブランチはDeploy Previewのみ）
+[context.production]
+  ignore = "git diff --quiet HEAD~ HEAD -- . || exit 1"
+
+[context.deploy-preview]
+  ignore = ""
+
 [[redirects]]
   from = "/"
   to = "/timecard.html"

@@ -1196,7 +1196,7 @@
 
         // --- メインアプリ ---
         const App = () => {
-            const { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, syncStatus } = useAppData();
+            const { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, saveSettingsToGAS, syncSettingsFromGAS, syncStatus } = useAppData();
             const [view, setView] = useState('punch'); 
             
             const [selectedStaffName, setSelectedStaffName] = useState('');

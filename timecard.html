@@ -135,6 +135,17 @@
                         if (data.settings.staffList) setStaffList(data.settings.staffList);
                         if (data.settings.adminPin) setAdminPin(data.settings.adminPin);
                         console.log('Settings synced from GAS');
+                    } else if (data.status === 'ok' && !data.settings) {
+                        // GASに設定がない場合、このデバイスのローカル設定をGASに保存する
+                        const localList = JSON.parse(localStorage.getItem('timecard_staff_v2') || '[]');
+                        const localPin = localStorage.getItem('admin_pin') || '0000';
+                        if (localList.length > 0) {
+                            fetch(targetUrl, {
+                                method: 'POST', mode: 'no-cors',
+                                headers: { 'Content-Type': 'text/plain' },
+                                body: JSON.stringify({ action: 'saveSettings', settings: { staffList: localList, adminPin: localPin } })
+                            }).then(() => console.log('Local settings pushed to GAS'));
+                        }
                     }
                 } catch(e) { console.error('Sync settings failed', e); }
             };

@@ -321,7 +321,11 @@ function getSettings(ss) {
         settings.staffList = JSON.parse(row[1]);
       } catch(e) { settings.staffList = []; }
     }
-    if (row[0] === 'adminPin') settings.adminPin = row[1].toString();
+    if (row[0] === 'adminPin') {
+      // 数値に変換されていた場合も考慮して文字列化し、4桁未満なら0埋めする
+      const pin = row[1].toString();
+      settings.adminPin = pin.length < 4 && /^\d+$/.test(pin) ? pin.padStart(4, '0') : pin;
+    }
   });
   return settings;
 }
@@ -335,10 +339,13 @@ function saveSettings(ss, settings) {
   sheet.clear();
   const rows = [];
   if (settings.staffList) rows.push(['staffList', JSON.stringify(settings.staffList)]);
-  if (settings.adminPin) rows.push(['adminPin', settings.adminPin]);
+  if (settings.adminPin !== undefined && settings.adminPin !== null) rows.push(['adminPin', settings.adminPin]);
   rows.push(['updatedAt', new Date()]);
 
   if (rows.length > 0) {
-    sheet.getRange(1, 1, rows.length, 2).setValues(rows);
+    const range = sheet.getRange(1, 1, rows.length, 2);
+    // B列をテキスト形式に設定してスプレッドシートの自動数値変換を防ぐ
+    sheet.getRange(1, 2, rows.length, 1).setNumberFormat('@');
+    range.setValues(rows);
   }
 }

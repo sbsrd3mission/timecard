@@ -161,7 +161,7 @@
             // no-corsモードではGASの処理完了を確認できないため、
             // 変更したレコードの「完全なデータ」を記録しておき、
             // クラウドのデータが一致するまでローカルデータを優先する（タイマーではなく検証ベース）
-            const PENDING_VERIFICATION_FALLBACK_MS = 300000; // 5分（フォールバック期限）
+            const PENDING_VERIFICATION_FALLBACK_MS = 86400000; // 24時間（フォールバック期限）
 
             // 変更を登録（recordData: レコードオブジェクト、削除の場合はnull）
             const addRecentChange = (recordId, recordData) => {

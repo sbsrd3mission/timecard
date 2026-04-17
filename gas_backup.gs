@@ -278,26 +278,18 @@ function writeRecord(ss, record) {
   const dowNames = ['日', '月', '火', '水', '木', '金', '土'];
   const dow = dowNames[dateObj.getDay()];
 
-  // 既存の打刻データがあれば優先・補完するハイブリッドマージ
-  const existingClockIn = existingData ? formatTimeCell(existingData[2]) : '';
-  const existingBreakStart = existingData ? formatTimeCell(existingData[3]) : '';
-  const existingBreakEnd = existingData ? formatTimeCell(existingData[4]) : '';
-  const existingClockOut = existingData ? formatTimeCell(existingData[5]) : '';
-  const existingMeal = existingData && (existingData[6] === '有' || existingData[6] === 1);
-  const existingPaidLeave = existingData && existingData[7] === '有給';
-  const existingRemarks = existingData ? existingData[8] : '';
-
-  // データを書き込み (元のデータがあれば優先して引き継ぎ、新しいものを追加)
+  // フロントエンドは常にレコードの全フィールドを送信するため、
+  // 受け取ったデータをそのまま書き込む（旧ハイブリッドマージは廃止）
   const rowData = [
     dateStr,
     dow,
-    existingClockIn ? existingClockIn : (record.clockIn || ''),
-    existingBreakStart ? existingBreakStart : (record.breakStart || ''),
-    existingBreakEnd ? existingBreakEnd : (record.breakEnd || ''),
-    existingClockOut ? existingClockOut : (record.clockOut || ''),
-    (record.meal || existingMeal) ? '有' : '',
-    (record.isPaidLeave || existingPaidLeave) ? '有給' : '',
-    record.remarks || existingRemarks || '',
+    record.clockIn || '',
+    record.breakStart || '',
+    record.breakEnd || '',
+    record.clockOut || '',
+    record.meal ? '有' : '',
+    record.isPaidLeave ? '有給' : '',
+    record.remarks || '',
     new Date()
   ];
 

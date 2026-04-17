@@ -132,7 +132,14 @@
                     if (!response.ok) return;
                     const data = await response.json();
                     if (data.status === 'ok' && data.settings) {
-                        if (data.settings.staffList) setStaffList(data.settings.staffList);
+                        if (data.settings.staffList) {
+                            // GASから取得したスタッフリストにもデフォルト値を付与（旧形式データ対応）
+                            const withDefaults = (s) => {
+                                const base = typeof s === 'string' ? { name: s, defaultMeal: true } : s;
+                                return { isOutsourced: false, hourlyRate: 1200, dailyTransport: 0, ...base };
+                            };
+                            setStaffList(data.settings.staffList.map(withDefaults));
+                        }
                         if (data.settings.adminPin) setAdminPin(data.settings.adminPin);
                         console.log('Settings synced from GAS');
                     } else if (data.status === 'ok' && !data.settings) {
@@ -682,15 +689,23 @@
                 setStaffList(newList);
                 saveSettingsToGAS(newList, adminPin);
             };
+            // debounce用タイマーRef（時給・交通費の入力で1文字ごとにGAS送信されるのを防止）
+            const settingsSaveTimerRef = useRef(null);
+            const debouncedSaveSettingsToGAS = (newList, pin) => {
+                if (settingsSaveTimerRef.current) clearTimeout(settingsSaveTimerRef.current);
+                settingsSaveTimerRef.current = setTimeout(() => {
+                    saveSettingsToGAS(newList, pin);
+                }, 500);
+            };
             const updateHourlyRate = (name, val) => {
                 const newList = staffList.map(s => s.name === name ? { ...s, hourlyRate: parseInt(val) || 0 } : s);
                 setStaffList(newList);
-                saveSettingsToGAS(newList, adminPin);
+                debouncedSaveSettingsToGAS(newList, adminPin);
             };
             const updateDailyTransport = (name, val) => {
                 const newList = staffList.map(s => s.name === name ? { ...s, dailyTransport: parseInt(val) || 0 } : s);
                 setStaffList(newList);
-                saveSettingsToGAS(newList, adminPin);
+                debouncedSaveSettingsToGAS(newList, adminPin);
             };
             const handleRemoveStaff = (name) => {
                 if (window.confirm(`${name}さんを削除しますか？\n（過去の打刻データは消えませんが、プルダウンに表示されなくなります）`)) {

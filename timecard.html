@@ -157,10 +157,37 @@
                 } catch(e) { console.error('Sync settings failed', e); }
             };
 
+            // === 最近変更されたレコードを保護するための仕組み ===
+            // no-corsモードではGASの処理完了を確認できないため、
+            // 変更したレコードIDとタイムスタンプを記録し、同期時にローカルデータを優先させる
+            const RECENT_CHANGE_PROTECTION_MS = 15000; // 15秒間保護
+
+            const addRecentChange = (recordId) => {
+                const changes = JSON.parse(localStorage.getItem('timecard_recent_changes') || '{}');
+                changes[recordId] = Date.now();
+                localStorage.setItem('timecard_recent_changes', JSON.stringify(changes));
+            };
+
+            const getRecentChanges = () => {
+                const changes = JSON.parse(localStorage.getItem('timecard_recent_changes') || '{}');
+                const now = Date.now();
+                const active = {};
+                // 期限切れのエントリを除去
+                Object.keys(changes).forEach(id => {
+                    if (now - changes[id] < RECENT_CHANGE_PROTECTION_MS) {
+                        active[id] = changes[id];
+                    }
+                });
+                localStorage.setItem('timecard_recent_changes', JSON.stringify(active));
+                return active;
+            };
+
             // GASへの送信関数
             const sendToGAS = async (record) => {
                 if (!gasUrl) return;
                 localStorage.setItem('timecard_local_update_time', Date.now().toString());
+                // このレコードIDを「最近変更済み」として保護登録
+                addRecentChange(record.id);
                 try {
                     await fetch(gasUrl, {
                         method: 'POST',
@@ -168,7 +195,8 @@
                         headers: { 'Content-Type': 'text/plain' },
                         body: JSON.stringify({ action: 'record', ...record })
                     });
-                    // 未送信リストから削除
+                    // no-corsモードではレスポンスを読めないため、
+                    // pendingリストからの削除はしない（最近変更リストで保護する）
                     const pending = JSON.parse(localStorage.getItem('timecard_pending_sync') || '[]');
                     const updated = pending.filter(p => p.id !== record.id);
                     localStorage.setItem('timecard_pending_sync', JSON.stringify(updated));
@@ -186,6 +214,8 @@
             const deleteFromGAS = async (recordId) => {
                 if (!gasUrl) return;
                 localStorage.setItem('timecard_local_update_time', Date.now().toString());
+                // このレコードIDを「最近変更（削除）済み」として保護登録
+                addRecentChange(recordId);
 
                 // 未送信リストの残骸から削除（ゾンビ復活防止）
                 const pending = JSON.parse(localStorage.getItem('timecard_pending_sync') || '[]');
@@ -224,9 +254,9 @@
                 const targetUrl = url || gasUrl;
                 if (!targetUrl) return { success: false, message: 'GAS URLが未設定です' };
 
-                // ローカル更新直後は、クラウド側での処理が終わる前に古いデータが降ってくるのを避けるため、8秒間同期をスキップする（Race Condition対策）
+                // ローカル更新直後は、クラウド側での処理が終わる前に古いデータが降ってくるのを避けるため、15秒間同期をスキップする（Race Condition対策）
                 const lastUpdate = parseInt(localStorage.getItem('timecard_local_update_time') || '0');
-                if (Date.now() - lastUpdate < 8000) {
+                if (Date.now() - lastUpdate < RECENT_CHANGE_PROTECTION_MS) {
                     return { success: true, count: 0, merged: [], message: 'ローカル更新直後のためスキップ' };
                 }
 
@@ -240,7 +270,7 @@
                     // 通信待機中（数秒間）にローカルで取消や修正の操作が行われた場合、ここで取得したデータは既に古いもの（亡霊）になっています。
                     // その古いデータが画面を上書きして復活させるのを完全に防ぐため、ここでもう一度ロックタイマーを確認します。
                     const checkLastUpdate = parseInt(localStorage.getItem('timecard_local_update_time') || '0');
-                    if (Date.now() - checkLastUpdate < 8000) {
+                    if (Date.now() - checkLastUpdate < RECENT_CHANGE_PROTECTION_MS) {
                         return { success: true, count: 0, merged: [], message: '通信中にローカル更新が起きたため、古いデータの反映をブロックしました' };
                     }
 
@@ -251,19 +281,41 @@
                     const pending = JSON.parse(localStorage.getItem('timecard_pending_sync') || '[]');
                     const pendingIds = pending.map(p => p.id);
 
+                    // 最近変更されたレコードIDを取得（保護対象）
+                    const recentChanges = getRecentChanges();
+                    const recentChangeIds = Object.keys(recentChanges);
+
                     let finalMerged = [];
                     setTimeRecords(prev => {
-                        const merged = [...gasRecords]; // クラウドのデータをベースにする
+                        const merged = [];
+                        const processedIds = new Set();
 
-                        // この端末の未送信データを上乗せする
+                        // 1. 最近変更されたレコードはローカルデータを優先
                         prev.forEach(localRec => {
-                            if (pendingIds.includes(localRec.id)) {
-                                if (!merged.find(r => r.id === localRec.id)) {
-                                    merged.push(localRec);
-                                }
+                            if (recentChangeIds.includes(localRec.id)) {
+                                merged.push(localRec);
+                                processedIds.add(localRec.id);
                             }
-                            // 未送信ではなく、クラウドにも無いローカルデータは、他端末で削除されたものなので切り捨てる
                         });
+
+                        // 2. 未送信データもローカルデータを優先
+                        prev.forEach(localRec => {
+                            if (pendingIds.includes(localRec.id) && !processedIds.has(localRec.id)) {
+                                merged.push(localRec);
+                                processedIds.add(localRec.id);
+                            }
+                        });
+
+                        // 3. それ以外はクラウドのデータを使用
+                        gasRecords.forEach(gasRec => {
+                            if (!processedIds.has(gasRec.id)) {
+                                merged.push(gasRec);
+                                processedIds.add(gasRec.id);
+                            }
+                        });
+
+                        // 注: 最近変更・未送信でもなく、クラウドにも無いローカルデータは
+                        // 他端末で削除されたものなので切り捨てる
                         
                         finalMerged = merged;
                         return merged;

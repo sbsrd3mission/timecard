@@ -11,8 +11,8 @@
 
 飲食店のスタッフ出退勤管理を行うWebアプリ。
 - **運用形態**: 店舗のPCやスタッフ個人のスマートフォンからアクセス
-- **デプロイ先**: GitHub Pages（mainブランチ → 自動デプロイ）
-  - Netlifyのクレジットは使い切ったため、現在はGitHub Pagesを使用予定
+- **デプロイ先**: Vercel（GitHub連携で自動デプロイ）
+  - Netlifyのビルドクレジット切れのためVercelに移行済み
 - **バックエンド**: Google Apps Script (GAS) — Google スプレッドシートにデータを保存
 - **ユーザー**: 飲食店オーナー（管理者）とスタッフ
 
@@ -23,7 +23,7 @@
 | フロントエンド | **単一HTML** (`timecard.html`) — React 18 + Babel (CDN) + Tailwind CSS (CDN) |
 | バックエンド | **Google Apps Script** (`gas_backup.gs`) — スプレッドシート連携 |
 | Excel出力 | **ExcelJS** (CDN) — 埋め込みBase64テンプレートからタイムカード帳票を生成 |
-| ホスティング | GitHub Pages (旧: Netlify) |
+| ホスティング | Vercel (旧: Netlify → GitHub Pages) |
 | リポジトリ | GitHub: `sbsrd3mission/timecard` |
 
 ## ファイル構成
@@ -32,7 +32,8 @@
 timecard/
 ├── timecard.html          # 🔑 メインアプリ（全機能がこの1ファイルに集約）
 ├── gas_backup.gs          # 🔑 GASバックエンドスクリプト（スプレッドシートにコピーして使用）
-├── netlify.toml           # Netlify設定（リダイレクト設定のみ、現在は参考用）
+├── vercel.json            # Vercel設定（ルートをtimecard.htmlにリライト）
+├── netlify.toml           # 旧Netlify設定（参考用、現在はVercelを使用）
 ├── .gitignore
 ├── convert_to_docx.py     # 取扱説明書のMarkdown → docx変換スクリプト
 ├── convert_staff_docx.py  # スタッフ用説明書の変換スクリプト
@@ -116,11 +117,11 @@ timecard/
 
 1. コードを修正
 2. `git add . && git commit -m "修正内容" && git push origin main`
-3. GitHub Pages が自動デプロイ（または将来的にNetlify復帰）
+3. Vercel が自動デプロイ（GitHub連携済み）
 
 ## 既知の課題・注意点
 
-- **Netlifyクレジット切れ**: 現在ビルド minutes を使い切っている。GitHub Pagesもしくはクレジット復活後にNetlifyで運用する
+- **Vercelに移行済み**: Netlifyのビルドクレジット切れのため、Vercelに移行済み。vercel.jsonでルート→timecard.htmlのリライト設定を実施
 - **GAS URL**: 各デバイスのローカルストレージに保存されている。新しいデバイスでは管理者画面からGAS URLを設定する必要がある
 - **GAS認証トークン**: GitHubリポジトリの公開設定変更時に新しいトークンが必要になった場合は、GASの再デプロイが必要
 - **同期の競合**: ローカル更新後8秒間はクラウドからの同期をブロックするロジックが入っている。この値を安易に変更しないこと

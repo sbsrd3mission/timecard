@@ -282,9 +282,9 @@
                                 // 未送信データはローカルを常に優先
                                 merged.push(pendingMap[id]);
                             } else if (local && cloud) {
-                                // 両方にある場合: clientUpdatedAt で比較
+                                // 両方にある場合: clientUpdatedAt で比較 (クラウドが旧バージョンの場合は serverUpdatedAtMs を使用)
                                 const localTs = local.clientUpdatedAt ? new Date(local.clientUpdatedAt).getTime() : 0;
-                                const cloudTs = cloud.clientUpdatedAt ? new Date(cloud.clientUpdatedAt).getTime() : 0;
+                                const cloudTs = cloud.clientUpdatedAt ? new Date(cloud.clientUpdatedAt).getTime() : (cloud.serverUpdatedAtMs || 0);
                                 if (localTs > cloudTs) {
                                     merged.push(local);
                                 } else {
@@ -1204,7 +1204,14 @@
                             </div>
                         )}
                         <p className="text-xs text-primary/50 mt-1">※ アプリ起動時に自動同期。すべての打刻がGASを介して全デバイスで共有されます。</p>
-                        <p className="text-xs text-orange-600 font-bold mt-1">⚠️ GASを更新した場合は「新しいデプロイ」が必要です。既存URLと異なるURLが発行されたら、こちらを更新してください。</p>
+                        <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded-lg">
+                            <p className="text-xs text-yellow-800 font-bold">⚠️ アプリの動作がおかしい、または他端末の変更が反映されない場合</p>
+                            <p className="text-xs text-yellow-700 mt-1">スマホやブラウザに古いバージョンが残っている可能性があります。定期的に以下のボタンで最新版に再読み込みしてください。</p>
+                            <button onClick={() => window.location.reload(true)} className="mt-2 px-3 py-1.5 bg-yellow-500 hover:bg-yellow-600 text-white font-bold rounded-lg text-xs transition-colors">
+                                🔄 最新版に強制再読み込み
+                            </button>
+                        </div>
+                        <p className="text-xs text-orange-600 font-bold mt-2">⚠️ GASを更新した場合は「新しいデプロイ」が必要です。既存URLと異なるURLが発行されたら、こちらを更新してください。</p>
                     </div>
 
                     <div className="p-6 bg-white rounded-2xl border-2 border-primary/20 shadow-sm text-left">

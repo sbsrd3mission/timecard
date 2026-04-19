@@ -171,7 +171,8 @@ function getAllRecords() {
         isPaidLeave: isActuallyPaidLeave,
         remarks: remarks,
         additionalBreakMins: 0,
-        clientUpdatedAt: clientUpdatedAt || null
+        clientUpdatedAt: clientUpdatedAt || null,
+        serverUpdatedAtMs: (row[9] instanceof Date) ? row[9].getTime() : 0
       };
 
       // 同じIDが複数行ある場合（重複行）は最新のものだけ残す

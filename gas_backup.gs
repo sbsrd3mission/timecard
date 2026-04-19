@@ -99,8 +99,8 @@ function getAllRecords() {
   const sheets = ss.getSheets();
   const tz = Session.getScriptTimeZone(); // スクリプトのタイムゾーン（通常 Asia/Tokyo）
 
-  // IDをキーとしたMapを使い、同一IDで複数行ある場合は最新（updatedAt が大きい）を残す
-  // ⇒ writeRecord が誤って重複行を作った場合でも常に最新データを返せる
+  // IDをキーとしたMapを使い、同一IDで複数行ある場合は最新を残す
+  // clientUpdatedAt（11列目）を優先し、なければサーバー側updatedAt（10列目）で比較
   const recordMap = {};
 
   sheets.forEach(sheet => {
@@ -111,8 +111,9 @@ function getAllRecords() {
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return;
 
-    // ヘッダー行を含む全データを取得（10列）
-    const data = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
+    // ヘッダー行を含む全データを取得（11列に拡張）
+    const lastCol = Math.max(sheet.getLastColumn(), 11);
+    const data = sheet.getRange(2, 1, lastRow - 1, Math.min(lastCol, 11)).getValues();
 
     data.forEach(row => {
       const dateCell = row[0];
@@ -120,18 +121,15 @@ function getAllRecords() {
 
       let dateStr = '';
       if (dateCell instanceof Date) {
-        // Date オブジェクトはスクリプトのタイムゾーンでフォーマット
         dateStr = Utilities.formatDate(dateCell, tz, 'yyyy-MM-dd');
       } else if (typeof dateCell === 'string') {
-        // 文字列の場合は YYYY-MM-DD 部分を抽出
         const match = dateCell.match(/(\d{4}-\d{2}-\d{2})/);
         if (!match) return;
         dateStr = match[1];
       } else {
-        return; // 日付が不正なら無視
+        return;
       }
 
-      // シート名からスタッフ名を抽出（最後の_YYYYMMを除く）
       const staffName = sheetName.replace(/_\d{6}$/, '');
       const id = staffName + '_' + dateStr;
 
@@ -143,15 +141,22 @@ function getAllRecords() {
       const isPaidLeave = (row[7] === '有給') || false;
       const remarks    = row[8] || '';
 
-      // 有給申請の場合はremarksから判定
       const isActuallyPaidLeave = isPaidLeave ||
         (typeof remarks === 'string' && remarks.includes('有給申請'));
 
-      // 10列目（index 9）は更新日時 (writeRecord が new Date() で書いている)
-      // 重複行がある場合の比較に使う（大きい方 = 新しい方を優先）
-      let updatedAtMs = 0;
-      if (row[9] instanceof Date) {
-        updatedAtMs = row[9].getTime();
+      // 11列目（index 10）= clientUpdatedAt（ISO文字列）
+      // 10列目（index 9）= サーバー側更新日時（フォールバック用）
+      let clientUpdatedAt = '';
+      if (row.length > 10 && row[10]) {
+        clientUpdatedAt = String(row[10]);
+      }
+
+      // 重複比較用: clientUpdatedAt > サーバー側updatedAt の優先順
+      let compareMs = 0;
+      if (clientUpdatedAt) {
+        compareMs = new Date(clientUpdatedAt).getTime() || 0;
+      } else if (row[9] instanceof Date) {
+        compareMs = row[9].getTime();
       }
 
       const record = {
@@ -165,12 +170,13 @@ function getAllRecords() {
         meal: meal,
         isPaidLeave: isActuallyPaidLeave,
         remarks: remarks,
-        additionalBreakMins: 0
+        additionalBreakMins: 0,
+        clientUpdatedAt: clientUpdatedAt || null
       };
 
       // 同じIDが複数行ある場合（重複行）は最新のものだけ残す
-      if (!recordMap[id] || updatedAtMs > recordMap[id]._updatedAtMs) {
-        record._updatedAtMs = updatedAtMs; // 比較用（返却時は削除）
+      if (!recordMap[id] || compareMs > recordMap[id]._compareMs) {
+        record._compareMs = compareMs;
         recordMap[id] = record;
       }
     });
@@ -179,7 +185,7 @@ function getAllRecords() {
   // 比較用フィールドを除いて返す
   const allRecords = Object.values(recordMap).map(r => {
     const rec = Object.assign({}, r);
-    delete rec._updatedAtMs;
+    delete rec._compareMs;
     return rec;
   });
 
@@ -265,11 +271,11 @@ function writeRecord(ss, record) {
   let sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
     sheet = ss.insertSheet(sheetName);
-    sheet.getRange(1, 1, 1, 10).setValues([[
+    sheet.getRange(1, 1, 1, 11).setValues([[
       '日付', '曜日', '出勤', '中抜け開始', '中抜け終了', '退勤',
-      '賄い', '有給', '備考', '更新日時'
+      '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt'
     ]]);
-    sheet.getRange(1, 1, 1, 10).setFontWeight('bold').setBackground('#e8f5e9');
+    sheet.getRange(1, 1, 1, 11).setFontWeight('bold').setBackground('#e8f5e9');
     sheet.setFrozenRows(1);
     sheet.setTabColor('#4caf50');
   }
@@ -277,38 +283,53 @@ function writeRecord(ss, record) {
   // スクリプトのタイムゾーンを使って日付比較（GASデプロイ環境に合わせる）
   const tz = Session.getScriptTimeZone();
 
+  // 受信データの clientUpdatedAt
+  const incomingClientUpdatedAt = record.clientUpdatedAt || '';
+  const incomingMs = incomingClientUpdatedAt ? new Date(incomingClientUpdatedAt).getTime() || 0 : 0;
+
   // 既存の行を検索（日付が一致する行を探す）
   const lastRow = sheet.getLastRow();
   let targetRow = -1;
-  let latestUpdatedAt = -1; // 重複行がある場合は最新行を更新対象にする
+  let existingLatestMs = -1; // 既存行のclientUpdatedAt最大値
+  let existingLatestClientUpdatedAt = '';
 
   if (lastRow >= 2) {
-    const dates   = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-    const allData = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
-    for (let i = 0; i < dates.length; i++) {
-      const cellDate = dates[i][0];
+    const lastCol = Math.max(sheet.getLastColumn(), 11);
+    const allData = sheet.getRange(2, 1, lastRow - 1, Math.min(lastCol, 11)).getValues();
+    for (let i = 0; i < allData.length; i++) {
+      const cellDate = allData[i][0];
       let cellDateStr = '';
       if (cellDate instanceof Date) {
-        // スクリプトのタイムゾーンでフォーマット（日付がずれるのを防ぐ）
         cellDateStr = Utilities.formatDate(cellDate, tz, 'yyyy-MM-dd');
       } else if (typeof cellDate === 'string') {
-        // 文字列の場合は YYYY-MM-DD 部分を抽出
         const match = cellDate.match(/(\d{4}-\d{2}-\d{2})/);
         cellDateStr = match ? match[1] : cellDate;
       }
       if (cellDateStr === dateStr) {
-        // 重複行がある場合は最新（updatedAt が最大）の行を更新対象にする
-        const updatedAtCell = allData[i][9];
-        let updatedAtMs = 0;
-        if (updatedAtCell instanceof Date) {
-          updatedAtMs = updatedAtCell.getTime();
+        // 既存行のclientUpdatedAtを取得して比較
+        let existingCuAt = '';
+        if (allData[i].length > 10 && allData[i][10]) {
+          existingCuAt = String(allData[i][10]);
         }
-        if (targetRow === -1 || updatedAtMs > latestUpdatedAt) {
+        let existingMs = 0;
+        if (existingCuAt) {
+          existingMs = new Date(existingCuAt).getTime() || 0;
+        } else if (allData[i][9] instanceof Date) {
+          existingMs = allData[i][9].getTime();
+        }
+
+        if (targetRow === -1 || existingMs > existingLatestMs) {
           targetRow = i + 2;
-          latestUpdatedAt = updatedAtMs;
+          existingLatestMs = existingMs;
+          existingLatestClientUpdatedAt = existingCuAt;
         }
       }
     }
+  }
+
+  // Idempotency保護: 受信データが既存データより古い場合は書き込みをスキップ
+  if (targetRow !== -1 && incomingMs > 0 && existingLatestMs > 0 && incomingMs < existingLatestMs) {
+    return; // 古いデータなのでスキップ
   }
 
   if (targetRow === -1) {
@@ -321,7 +342,7 @@ function writeRecord(ss, record) {
   const dow = dowNames[dateObj.getDay()];
 
   // フロントエンドは常にレコードの全フィールドを送信するため、
-  // 受け取ったデータをそのまま書き込む
+  // 受け取ったデータをそのまま書き込む（11列に拡張）
   const rowData = [
     dateStr,
     dow,
@@ -332,10 +353,11 @@ function writeRecord(ss, record) {
     record.meal ? '有' : '',
     record.isPaidLeave ? '有給' : '',
     record.remarks || '',
-    new Date()
+    new Date(),
+    incomingClientUpdatedAt
   ];
 
-  sheet.getRange(targetRow, 1, 1, 10).setValues([rowData]);
+  sheet.getRange(targetRow, 1, 1, 11).setValues([rowData]);
 }
 
 // ===== 設定情報の操作 =====

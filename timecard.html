@@ -792,9 +792,45 @@
                         return (h * 3600 + m * 60 + s) / 86400;
                     };
 
-                    // ステップ1: 全シートの日付・曜日・データセルを対象月に書き換え
+                    // ステップ1: 「マスタ」以外の古いシートを削除
+                    const masterSheetInfo = workbook.getWorksheet('マスタ');
+                    if (!masterSheetInfo) {
+                        alert("テンプレートに「マスタ」シートが見つかりません。");
+                        return;
+                    }
+                    const sheetsToDelete = [];
                     workbook.eachSheet((ws) => {
-                        // ヘッダー行を探す（「出勤」「退勤」「曜日」を含む行）
+                        if (ws.name !== 'マスタ') sheetsToDelete.push(ws.id);
+                    });
+                    sheetsToDelete.forEach(id => workbook.removeWorksheet(id));
+
+                    // ステップ2: staffListに登録されたスタッフ毎に「マスタ」をコピーしてシートを生成
+                    staffList.filter(s => !s.isOutsourced).forEach(staff => {
+                        const masterWs = workbook.getWorksheet('マスタ');
+                        const ws = workbook.addWorksheet(staff.name);
+                        
+                        // マスタの列幅・スタイルをコピー
+                        masterWs.columns.forEach((col, index) => {
+                            const newCol = ws.getColumn(index + 1);
+                            if (col.width) newCol.width = col.width;
+                            if (col.style) newCol.style = col.style;
+                        });
+                        
+                        // 行の高さ・セル値・スタイルをコピー
+                        masterWs.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+                            const newRow = ws.getRow(rowNumber);
+                            if (row.height) newRow.height = row.height;
+                            row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+                                const newCell = newRow.getCell(colNumber);
+                                newCell.value = cell.value;
+                                newCell.style = cell.style;
+                            });
+                        });
+                        // 結合セルをコピー
+                        if (masterWs.model.merges) {
+                            masterWs.model.merges.forEach(merge => ws.mergeCells(merge));
+                        }
+
                         let startRow = -1;
                         ws.eachRow((row, rowNumber) => {
                             if (startRow !== -1) return;
@@ -807,7 +843,6 @@
                             });
                             if (isHeader) startRow = rowNumber + 1;
                         });
-                        // ヘッダーが見つからない場合はデータ行を自動検出
                         if (startRow === -1) {
                             ws.eachRow((row, rowNumber) => {
                                 if (startRow !== -1) return;
@@ -817,8 +852,9 @@
                                 }
                             });
                         }
-                        if (startRow === -1) return; // データ行が見つからないシートはスキップ
+                        if (startRow === -1) startRow = 2; // デフォルト
 
+                        // 日付・曜日を当月に書き換え
                         for (let d = 1; d <= 31; d++) {
                             const row = ws.getRow(startRow + d - 1);
                             // 全書き込み対象セルをクリア
@@ -832,33 +868,6 @@
                                 row.getCell(2).value = ['日', '月', '火', '水', '木', '金', '土'][targetDateObj.getDay()];
                             }
                         }
-                    });
-
-                    // ステップ2: staffListに登録されたスタッフのシートに勤怠データを書き込み
-                    staffList.filter(s => !s.isOutsourced).forEach(staff => {
-                        const ws = workbook.getWorksheet(staff.name);
-                        if (!ws) return;
-
-                        let startRow = -1;
-                        ws.eachRow((row, rowNumber) => {
-                            if (startRow !== -1) return;
-                            let isHeader = false;
-                            row.eachCell((cell) => {
-                                const v = cell.value;
-                                if (typeof v === 'string' && (v.includes('出勤') || v.includes('曜日') || v.includes('退勤'))) {
-                                    isHeader = true;
-                                }
-                            });
-                            if (isHeader) startRow = rowNumber + 1;
-                        });
-                        if (startRow === -1) {
-                            ws.eachRow((row, rowNumber) => {
-                                if (startRow !== -1) return;
-                                const cellA = row.getCell(1).value;
-                                if (cellA instanceof Date) startRow = rowNumber;
-                            });
-                        }
-                        if (startRow === -1) startRow = 2;
 
                         for (let d = 1; d <= daysInMonth; d++) {
                             const row = ws.getRow(startRow + d - 1);
@@ -991,9 +1000,50 @@
                         return startRow;
                     };
 
+                    // ステップ1: 「マスタ」以外の古いシートを削除
+                    const masterSheetInfo = workbook.getWorksheet('マスタ');
+                    if (!masterSheetInfo) {
+                        alert("テンプレートに「マスタ」シートが見つかりません。");
+                        return;
+                    }
+                    const sheetsToDelete = [];
                     workbook.eachSheet((ws) => {
-                        const startRow = findStartRow(ws);
-                        if (startRow === -1) return;
+                        if (ws.name !== 'マスタ') sheetsToDelete.push(ws.id);
+                    });
+                    sheetsToDelete.forEach(id => workbook.removeWorksheet(id));
+
+                    // ステップ2: 外注者毎に「マスタ」をコピーしてシートを生成し、データを書き込み（賄いは書かない）
+                    const outsourcedPayData = {};
+                    outsourcedStaff.forEach(staff => {
+                        const masterWs = workbook.getWorksheet('マスタ');
+                        const ws = workbook.addWorksheet(staff.name);
+                        
+                        // マスタの列幅・スタイルをコピー
+                        masterWs.columns.forEach((col, index) => {
+                            const newCol = ws.getColumn(index + 1);
+                            if (col.width) newCol.width = col.width;
+                            if (col.style) newCol.style = col.style;
+                        });
+                        
+                        // 行の高さ・セル値・スタイルをコピー
+                        masterWs.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+                            const newRow = ws.getRow(rowNumber);
+                            if (row.height) newRow.height = row.height;
+                            row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+                                const newCell = newRow.getCell(colNumber);
+                                newCell.value = cell.value;
+                                newCell.style = cell.style;
+                            });
+                        });
+                        // 結合セルをコピー
+                        if (masterWs.model.merges) {
+                            masterWs.model.merges.forEach(merge => ws.mergeCells(merge));
+                        }
+
+                        let startRow = findStartRow(ws);
+                        if (startRow === -1) startRow = 2;
+
+                        // 日付・曜日を当月に書き換え
                         for (let d = 1; d <= 31; d++) {
                             const row = ws.getRow(startRow + d - 1);
                             [1,2,3,4,5,6,7,16].forEach(c => { row.getCell(c).value = null; });
@@ -1005,16 +1055,6 @@
                                 row.getCell(2).value = ['日','月','火','水','木','金','土'][targetDateObj.getDay()];
                             }
                         }
-                    });
-
-                    // ステップ2: 外注者のデータを書き込み（賄いは書かない）
-                    const outsourcedPayData = {};
-                    outsourcedStaff.forEach(staff => {
-                        const ws = workbook.getWorksheet(staff.name);
-                        if (!ws) return;
-
-                        const startRow = findStartRow(ws);
-                        if (startRow === -1) return;
 
                         let totalDays = 0, totalCalcFrac = 0;
 

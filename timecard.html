@@ -836,8 +836,79 @@
 
                     // ステップ2: staffListに登録されたスタッフのシートに勤怠データを書き込み
                     staffList.filter(s => !s.isOutsourced).forEach(staff => {
-                        const ws = workbook.getWorksheet(staff.name);
-                        if (!ws) return;
+                        let ws = workbook.getWorksheet(staff.name);
+
+                        // ===== 完全一致のシートがない場合のハイブリッド対応 =====
+                        if (!ws) {
+                            // 1. リネーム追従：名前の部分一致シートを探す
+                            let fallbackWs = null;
+                            workbook.eachSheet((sheet) => {
+                                if (sheet.name !== 'マスタ' && sheet.name.length > 0 && staff.name.includes(sheet.name)) {
+                                    if (!fallbackWs) fallbackWs = sheet;
+                                }
+                            });
+                            if (fallbackWs) {
+                                fallbackWs.name = staff.name; // 旧シートをフルネームにリネーム
+                                ws = fallbackWs;
+                            }
+                        }
+
+                        if (!ws) {
+                            // 2. 新規作成：「マスタ」シートから丸ごとコピーして新規生成
+                            const masterWs = workbook.getWorksheet('マスタ');
+                            if (masterWs) {
+                                ws = workbook.addWorksheet(staff.name);
+                                // マスタの列幅・スタイルをコピー
+                                masterWs.columns.forEach((col, index) => {
+                                    const newCol = ws.getColumn(index + 1);
+                                    if (col.width) newCol.width = col.width;
+                                    if (col.style) newCol.style = col.style;
+                                });
+                                // 行の高さ・セル値・スタイルをコピー
+                                masterWs.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+                                    const newRow = ws.getRow(rowNumber);
+                                    if (row.height) newRow.height = row.height;
+                                    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+                                        const newCell = newRow.getCell(colNumber);
+                                        newCell.value = cell.value;
+                                        newCell.style = cell.style;
+                                    });
+                                });
+                                // 結合セルをコピー
+                                if (masterWs.model.merges) {
+                                    masterWs.model.merges.forEach(merge => ws.mergeCells(merge));
+                                }
+                                
+                                // 新規シートの日付セル等を今月に更新
+                                let sRow = -1;
+                                ws.eachRow((r, rNum) => {
+                                    if (sRow !== -1) return;
+                                    let isH = false;
+                                    r.eachCell(c => {
+                                        if (typeof c.value === 'string' && (c.value.includes('出勤') || c.value.includes('曜日'))) isH = true;
+                                    });
+                                    if (isH) sRow = rNum + 1;
+                                });
+                                if (sRow === -1) sRow = 2;
+
+                                for (let d = 1; d <= 31; d++) {
+                                    const r = ws.getRow(sRow + d - 1);
+                                    [1,2,3,4,5,6,7,16].forEach(c => { r.getCell(c).value = null; });
+                                    if (d <= daysInMonth) {
+                                        const tDateObj = new Date(year, month - 1, d);
+                                        const dVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
+                                        r.getCell(1).value = dVal;
+                                        r.getCell(1).numFmt = 'yyyy/m/d';
+                                        r.getCell(2).value = ['日', '月', '火', '水', '木', '金', '土'][tDateObj.getDay()];
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!ws) {
+                            console.warn(`テンプレート内に「マスタ」がないため、${staff.name} さんのシートを生成できません。`);
+                            return;
+                        }
 
                         let startRow = -1;
                         ws.eachRow((row, rowNumber) => {
@@ -1010,8 +1081,65 @@
                     // ステップ2: 外注者のデータを書き込み（賄いは書かない）
                     const outsourcedPayData = {};
                     outsourcedStaff.forEach(staff => {
-                        const ws = workbook.getWorksheet(staff.name);
-                        if (!ws) return;
+                        let ws = workbook.getWorksheet(staff.name);
+
+                        // ===== 完全一致のシートがない場合のハイブリッド対応 =====
+                        if (!ws) {
+                            let fallbackWs = null;
+                            workbook.eachSheet((sheet) => {
+                                if (sheet.name !== 'マスタ' && sheet.name.length > 0 && staff.name.includes(sheet.name)) {
+                                    if (!fallbackWs) fallbackWs = sheet;
+                                }
+                            });
+                            if (fallbackWs) {
+                                fallbackWs.name = staff.name; // 旧シートをフルネームにリネーム
+                                ws = fallbackWs;
+                            }
+                        }
+
+                        if (!ws) {
+                            const masterWs = workbook.getWorksheet('マスタ');
+                            if (masterWs) {
+                                ws = workbook.addWorksheet(staff.name);
+                                masterWs.columns.forEach((col, index) => {
+                                    const newCol = ws.getColumn(index + 1);
+                                    if (col.width) newCol.width = col.width;
+                                    if (col.style) newCol.style = col.style;
+                                });
+                                masterWs.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+                                    const newRow = ws.getRow(rowNumber);
+                                    if (row.height) newRow.height = row.height;
+                                    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+                                        const newCell = newRow.getCell(colNumber);
+                                        newCell.value = cell.value;
+                                        newCell.style = cell.style;
+                                    });
+                                });
+                                if (masterWs.model.merges) {
+                                    masterWs.model.merges.forEach(merge => ws.mergeCells(merge));
+                                }
+
+                                let sRow = findStartRow(ws);
+                                if (sRow === -1) sRow = 2;
+
+                                for (let d = 1; d <= 31; d++) {
+                                    const r = ws.getRow(sRow + d - 1);
+                                    [1,2,3,4,5,6,7,16].forEach(c => { r.getCell(c).value = null; });
+                                    if (d <= daysInMonth) {
+                                        const tDateObj = new Date(year, month - 1, d);
+                                        const dVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
+                                        r.getCell(1).value = dVal;
+                                        r.getCell(1).numFmt = 'yyyy/m/d';
+                                        r.getCell(2).value = ['日','月','火','水','木','金','土'][tDateObj.getDay()];
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!ws) {
+                            console.warn(`テンプレート内に「マスタ」がないため、${staff.name} さんのシートを生成できません。`);
+                            return;
+                        }
 
                         const startRow = findStartRow(ws);
                         if (startRow === -1) return;

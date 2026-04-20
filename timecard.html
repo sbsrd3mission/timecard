@@ -191,24 +191,18 @@
                 }
             };
 
-            // GASからの削除関数
             const deleteFromGAS = async (recordId) => {
                 if (!gasUrl) return;
-                localStorage.setItem('timecard_local_update_time', Date.now().toString());
-
-                // 未送信リストの残骸から削除（ゾンビ復活防止）
-                const pending = JSON.parse(localStorage.getItem('timecard_pending_sync') || '[]');
-                const updatedPending = pending.filter(p => p.id !== recordId);
-                localStorage.setItem('timecard_pending_sync', JSON.stringify(updatedPending));
-
-                try {
-                    await fetch(gasUrl, {
-                        method: 'POST',
-                        mode: 'no-cors',
-                        headers: { 'Content-Type': 'text/plain' },
-                        body: JSON.stringify({ action: 'delete', id: recordId })
-                    });
-                } catch(e) { console.error('Delete failed', e); }
+                const [staff, dStr] = recordId.split('_');
+                const deleteRecord = {
+                    id: recordId,
+                    staffName: staff,
+                    date: dStr,
+                    deleted: true,
+                    remarks: "【完全削除済】", // 古いGASがdeletedフラグを無視した場合のフォールバック
+                    clientUpdatedAt: new Date().toISOString()
+                };
+                await sendToGAS(deleteRecord);
             };
 
             // 未送信データの再送信
@@ -233,22 +227,23 @@
                 const targetUrl = url || gasUrl;
                 if (!targetUrl) return { success: false, message: 'GAS URLが未設定です' };
 
-                // ローカル更新直後5秒間は同期をスキップ（初期Race Condition対策）
+                // ローカル更新直後15秒間は同期をスキップ（初期Race Condition対策）
                 const lastUpdate = parseInt(localStorage.getItem('timecard_local_update_time') || '0');
-                if (Date.now() - lastUpdate < 5000) {
+                if (Date.now() - lastUpdate < 15000) {
                     return { success: true, count: 0, merged: [], message: 'ローカル更新直後のためスキップ' };
                 }
 
                 if (!silent) setSyncStatus(s => ({ ...s, state: 'loading', message: '同期中...' }));
                 try {
-                    const response = await fetch(targetUrl + '?action=getAll', { method: 'GET' });
+                    const cb = '&t=' + Date.now();
+                    const response = await fetch(targetUrl + '?action=getAll' + cb, { method: 'GET', cache: 'no-store' });
                     if (!response.ok) throw new Error('HTTP ' + response.status);
                     const data = await response.json();
                     if (data.status !== 'ok') throw new Error(data.message || '不明なエラー');
 
                     // 通信中にローカル更新が起きた場合はスキップ
                     const checkLastUpdate = parseInt(localStorage.getItem('timecard_local_update_time') || '0');
-                    if (Date.now() - checkLastUpdate < 5000) {
+                    if (Date.now() - checkLastUpdate < 15000) {
                         return { success: true, count: 0, merged: [], message: '通信中にローカル更新が起きたためスキップ' };
                     }
 
@@ -277,35 +272,33 @@
                             const local = localMap[id];
                             const cloud = cloudMap[id];
                             const isPending = !!pendingMap[id];
+                            
+                            let winner = null;
 
                             if (isPending) {
                                 // 未送信データはローカルを常に優先
-                                merged.push(pendingMap[id]);
+                                winner = pendingMap[id];
                             } else if (local && cloud) {
                                 // 両方にある場合: clientUpdatedAt で比較 (クラウドが旧バージョンの場合は serverUpdatedAtMs を使用)
                                 const localTs = local.clientUpdatedAt ? new Date(local.clientUpdatedAt).getTime() : 0;
                                 const cloudTs = cloud.clientUpdatedAt ? new Date(cloud.clientUpdatedAt).getTime() : (cloud.serverUpdatedAtMs || 0);
-                                if (localTs > cloudTs) {
-                                    merged.push(local);
-                                } else {
-                                    merged.push(cloud);
-                                }
+                                winner = (localTs > cloudTs) ? local : cloud;
                             } else if (cloud) {
                                 // クラウドのみ → クラウドデータを採用
-                                merged.push(cloud);
-                            } else if (local && local.clientUpdatedAt) {
-                                // ローカルのみ（クラウドにない）
-                                // clientUpdatedAt があるなら「まだ送信されていない」可能性
-                                // → 送信を試みる
-                                const localAge = Date.now() - new Date(local.clientUpdatedAt).getTime();
-                                if (localAge < 86400000) { // 24時間以内
-                                    merged.push(local);
-                                    // 再送信キューに追加
-                                    fetch(targetUrl, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ action: 'record', ...local }) });
-                                }
-                                // 24時間以上経過 → 他デバイスで削除されたとみなし切り捨て
+                                winner = cloud;
                             }
-                            // local のみで clientUpdatedAt がない → 古い孤立データ、切り捨て
+
+                            // Tombstone（削除済みフラグ）がない場合のみ採用
+                            // ※ 古いGASコードが deleted を返さない場合のためのフォールバックとして remarks もチェック
+                            const isDeleted = winner && (
+                                winner.deleted === true || 
+                                winner.deleted === "true" || 
+                                (winner.remarks && winner.remarks.includes("【完全削除済】"))
+                            );
+
+                            if (!isDeleted) {
+                                merged.push(winner);
+                            }
                         });
 
                         finalMerged = merged;

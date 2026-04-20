@@ -75,9 +75,12 @@ function doPost(e) {
     }
 
     if (data.action === 'delete') {
-      // レコードの削除（打刻取消）
-      deleteRecord(ss, data.id);
-      return createJsonResponse({ status: 'ok', message: 'データを削除しました' });
+      // レコードの削除（論理削除: Tombstone）
+      // 古いDELETE方式から、deletedフラグを立てて保存する方式に変更
+      data.deleted = true;
+      if (!data.clientUpdatedAt) data.clientUpdatedAt = new Date().toISOString();
+      writeRecord(ss, data);
+      return createJsonResponse({ status: 'ok', message: 'データを削除しました（論理削除）' });
     }
 
     if (data.action === 'saveSettings') {
@@ -112,8 +115,8 @@ function getAllRecords() {
     if (lastRow < 2) return;
 
     // ヘッダー行を含む全データを取得（11列に拡張）
-    const lastCol = Math.max(sheet.getLastColumn(), 11);
-    const data = sheet.getRange(2, 1, lastRow - 1, Math.min(lastCol, 11)).getValues();
+    const lastCol = Math.max(sheet.getLastColumn(), 12);
+    const data = sheet.getRange(2, 1, lastRow - 1, Math.min(lastCol, 12)).getValues();
 
     data.forEach(row => {
       const dateCell = row[0];
@@ -159,6 +162,12 @@ function getAllRecords() {
         compareMs = row[9].getTime();
       }
 
+      // 12列目（index 11）= deletedフラグ
+      let isDeleted = false;
+      if (row.length > 11 && (row[11] === 'true' || row[11] === true)) {
+        isDeleted = true;
+      }
+
       const record = {
         id: id,
         staffName: staffName,
@@ -172,7 +181,8 @@ function getAllRecords() {
         remarks: remarks,
         additionalBreakMins: 0,
         clientUpdatedAt: clientUpdatedAt || null,
-        serverUpdatedAtMs: (row[9] instanceof Date) ? row[9].getTime() : 0
+        serverUpdatedAtMs: (row[9] instanceof Date) ? row[9].getTime() : 0,
+        deleted: isDeleted
       };
 
       // 同じIDが複数行ある場合（重複行）は最新のものだけ残す
@@ -272,11 +282,11 @@ function writeRecord(ss, record) {
   let sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
     sheet = ss.insertSheet(sheetName);
-    sheet.getRange(1, 1, 1, 11).setValues([[
+    sheet.getRange(1, 1, 1, 12).setValues([[
       '日付', '曜日', '出勤', '中抜け開始', '中抜け終了', '退勤',
-      '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt'
+      '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt', '削除フラグ'
     ]]);
-    sheet.getRange(1, 1, 1, 11).setFontWeight('bold').setBackground('#e8f5e9');
+    sheet.getRange(1, 1, 1, 12).setFontWeight('bold').setBackground('#e8f5e9');
     sheet.setFrozenRows(1);
     sheet.setTabColor('#4caf50');
   }
@@ -295,8 +305,8 @@ function writeRecord(ss, record) {
   let existingLatestClientUpdatedAt = '';
 
   if (lastRow >= 2) {
-    const lastCol = Math.max(sheet.getLastColumn(), 11);
-    const allData = sheet.getRange(2, 1, lastRow - 1, Math.min(lastCol, 11)).getValues();
+    const lastCol = Math.max(sheet.getLastColumn(), 12);
+    const allData = sheet.getRange(2, 1, lastRow - 1, Math.min(lastCol, 12)).getValues();
     for (let i = 0; i < allData.length; i++) {
       const cellDate = allData[i][0];
       let cellDateStr = '';
@@ -343,7 +353,7 @@ function writeRecord(ss, record) {
   const dow = dowNames[dateObj.getDay()];
 
   // フロントエンドは常にレコードの全フィールドを送信するため、
-  // 受け取ったデータをそのまま書き込む（11列に拡張）
+  // 受け取ったデータをそのまま書き込む（12列に拡張: 削除フラグ）
   const rowData = [
     dateStr,
     dow,
@@ -355,10 +365,11 @@ function writeRecord(ss, record) {
     record.isPaidLeave ? '有給' : '',
     record.remarks || '',
     new Date(),
-    incomingClientUpdatedAt
+    incomingClientUpdatedAt,
+    record.deleted ? 'true' : ''
   ];
 
-  sheet.getRange(targetRow, 1, 1, 11).setValues([rowData]);
+  sheet.getRange(targetRow, 1, 1, 12).setValues([rowData]);
 }
 
 // ===== 設定情報の操作 =====

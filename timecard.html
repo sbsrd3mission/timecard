@@ -280,20 +280,26 @@
                                 winner = pendingMap[id];
                             } else if (local && cloud) {
                                 // 両方にある場合: clientUpdatedAt で比較 (クラウドが旧バージョンの場合は serverUpdatedAtMs を使用)
-                                const localTs = local.clientUpdatedAt ? new Date(local.clientUpdatedAt).getTime() : 0;
-                                const cloudTs = cloud.clientUpdatedAt ? new Date(cloud.clientUpdatedAt).getTime() : (cloud.serverUpdatedAtMs || 0);
+                                const localTs = (local.clientUpdatedAt && !isNaN(new Date(local.clientUpdatedAt).getTime())) ? new Date(local.clientUpdatedAt).getTime() : 0;
+                                const cloudTs = (cloud.clientUpdatedAt && !isNaN(new Date(cloud.clientUpdatedAt).getTime())) ? new Date(cloud.clientUpdatedAt).getTime() : (Number(cloud.serverUpdatedAtMs) || 0);
                                 winner = (localTs > cloudTs) ? local : cloud;
                             } else if (cloud) {
                                 // クラウドのみ → クラウドデータを採用
                                 winner = cloud;
+                            } else if (local) {
+                                // ローカルのみ（クラウド側のシートが削除された場合など）→ ローカルデータを採用
+                                winner = local;
                             }
+
+                            // winner が null の場合はスキップ（安全弁）
+                            if (!winner) return;
 
                             // Tombstone（削除済みフラグ）がない場合のみ採用
                             // ※ 古いGASコードが deleted を返さない場合のためのフォールバックとして remarks もチェック
-                            const isDeleted = winner && (
+                            const isDeleted = (
                                 winner.deleted === true || 
                                 winner.deleted === "true" || 
-                                (winner.remarks && winner.remarks.includes("【完全削除済】"))
+                                (typeof winner.remarks === 'string' && winner.remarks.includes("【完全削除済】"))
                             );
 
                             if (!isDeleted) {

@@ -1,109 +1,66 @@
 /**
- * タイムカード 双方向同期 - Google Apps Script
- * 
- * このスクリプトをGoogleスプレッドシートのApps Scriptにコピーして
- * Webアプリとしてデプロイしてください。
- * 
- * デプロイ設定:
- *   - 実行するユーザー: 自分
- *   - アクセスできるユーザー: 全員（匿名ユーザーを含む）
- * 
- * 機能:
- * [書き込み] POST: 打刻データを受信してスプレッドシートに記録
- * [読み取り] GET ?action=getAll: 全打刻データをJSON形式で返す
- * [読み取り] GET ?action=ping: 接続確認
+ * タイムカード サーバーサイド(Google Apps Script)
+ * スプレッドシートをDBとして使用します。
  */
 
-// ===== CORS ヘッダーを付けたレスポンス生成 =====
-function createJsonResponse(data) {
-  const output = ContentService.createTextOutput(JSON.stringify(data));
-  output.setMimeType(ContentService.MimeType.JSON);
-  return output;
-}
-
-// ===== GET: データ読み取りエンドポイント =====
 function doGet(e) {
-  try {
-    const action = (e && e.parameter && e.parameter.action) || 'ping';
+  const action = e.parameter.action;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
 
-    if (action === 'getAll') {
-      return getAllRecords();
-    }
-
-    if (action === 'getSettings') {
-      const ss = SpreadsheetApp.getActiveSpreadsheet();
-      return createJsonResponse({ status: 'ok', settings: getSettings(ss) });
-    }
-
-    // ping（接続テスト）
-    return createJsonResponse({
-      status: 'ok',
-      message: '接続成功！タイムカード双方向同期が動作中です。',
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (error) {
-    return createJsonResponse({ status: 'error', message: error.message });
+  if (action === 'getAll') {
+    return getAllRecords();
+  } else if (action === 'getSettings') {
+    const settings = getSettings(ss);
+    return createJsonResponse({ status: 'ok', settings: settings });
+  } else if (action === 'ping') {
+    return createJsonResponse({ status: 'ok', message: 'pong', timestamp: new Date().toISOString() });
   }
+
+  return createJsonResponse({ status: 'error', message: 'Invalid action' });
 }
 
-// ===== POST: データ書き込みエンドポイント =====
 function doPost(e) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let postData;
   try {
-    const data = JSON.parse(e.postData.contents);
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-
-    if (data.action === 'sync') {
-      // 複数レコードの一括同期
-      const records = data.records || [];
-      let count = 0;
-      records.forEach(record => {
-        writeRecord(ss, record);
-        count++;
-      });
-      return createJsonResponse({
-        status: 'ok',
-        message: count + '件のデータを同期しました',
-        count: count
-      });
-    }
-
-    if (data.action === 'record') {
-      // 単一レコードの書き込み
-      writeRecord(ss, data);
-      return createJsonResponse({ status: 'ok', message: 'データを記録しました' });
-    }
-
-    if (data.action === 'delete') {
-      // レコードの削除（論理削除: Tombstone）
-      // 古いDELETE方式から、deletedフラグを立てて保存する方式に変更
-      data.deleted = true;
-      if (!data.clientUpdatedAt) data.clientUpdatedAt = new Date().toISOString();
-      writeRecord(ss, data);
-      return createJsonResponse({ status: 'ok', message: 'データを削除しました（論理削除）' });
-    }
-
-    if (data.action === 'saveSettings') {
-      // 設定情報の保存（スタッフリスト、PINコード）
-      saveSettings(ss, data.settings);
-      return createJsonResponse({ status: 'ok', message: '設定を保存しました' });
-    }
-
-    return createJsonResponse({ status: 'error', message: '不明なアクションです' });
-
-  } catch (error) {
-    return createJsonResponse({ status: 'error', message: error.message });
+    postData = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return createJsonResponse({ status: 'error', message: 'Invalid JSON' });
   }
+
+  const action = postData.action;
+
+  if (action === 'record') {
+    writeRecord(ss, postData);
+    return createJsonResponse({ status: 'ok' });
+  } else if (action === 'sync') {
+    const records = postData.records || [];
+    records.forEach(r => writeRecord(ss, r));
+    return createJsonResponse({ status: 'ok', count: records.length });
+  } else if (action === 'delete') {
+    deleteRecord(ss, postData.id);
+    return createJsonResponse({ status: 'ok' });
+  } else if (action === 'saveSettings') {
+    saveSettings(ss, postData.settings);
+    return createJsonResponse({ status: 'ok' });
+  }
+
+  return createJsonResponse({ status: 'error', message: 'Invalid action' });
+}
+
+function createJsonResponse(data) {
+  return ContentService.createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 // ===== 全レコード読み取り =====
 function getAllRecords() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheets = ss.getSheets();
-  const tz = Session.getScriptTimeZone(); // スクリプトのタイムゾーン（通常 Asia/Tokyo）
+  const tz = Session.getScriptTimeZone();
 
   // IDをキーとしたMapを使い、同一IDで複数行ある場合は最新を残す
-  // clientUpdatedAt（11列目）を優先し、なければサーバー側updatedAt（10列目）で比較
+  // clientUpdatedAt (11列目) または serverUpdatedAtMs (10列目) を優先
   const recordMap = {};
 
   sheets.forEach(sheet => {
@@ -114,52 +71,68 @@ function getAllRecords() {
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return;
 
-    // ヘッダー行を含む全データを取得（11列に拡張）
+    // 12列まで取得（日付、曜日、出勤、中抜け、退勤、賄い、有給、備考、更新日時、clientUpdatedAt、削除フラグ）
     const lastCol = Math.max(sheet.getLastColumn(), 12);
-    const data = sheet.getRange(2, 1, lastRow - 1, Math.min(lastCol, 12)).getValues();
+    let data;
+    try {
+      data = sheet.getRange(2, 1, lastRow - 1, Math.min(lastCol, 12)).getValues();
+    } catch (e) {
+      console.warn('Sheet access error: ' + sheetName, e);
+      return;
+    }
 
     data.forEach(row => {
+      // 最小限必要な列データ(日付)があるか確認
+      if (!row || row.length < 1) return;
+      
       const dateCell = row[0];
       if (!dateCell) return;
 
       let dateStr = '';
-      if (dateCell instanceof Date) {
-        dateStr = Utilities.formatDate(dateCell, tz, 'yyyy-MM-dd');
-      } else if (typeof dateCell === 'string') {
-        const match = dateCell.match(/(\d{4}-\d{2}-\d{2})/);
-        if (!match) return;
-        dateStr = match[1];
-      } else {
-        return;
+      try {
+        if (dateCell instanceof Date) {
+          dateStr = Utilities.formatDate(dateCell, tz, 'yyyy-MM-dd');
+        } else if (typeof dateCell === 'string') {
+          const match = dateCell.match(/(\d{4}-\d{2}-\d{2})/);
+          if (!match) return;
+          dateStr = match[1];
+        } else {
+          return;
+        }
+      } catch (e) {
+        return; // 日付パース失敗時はスキップ
       }
 
       const staffName = sheetName.replace(/_\d{6}$/, '');
       const id = staffName + '_' + dateStr;
-
+      
+      const clientUpdatedAt = (row.length > 10 && row[10]) ? String(row[10]) : '';
       const clockIn    = formatTimeCell(row[2]);
       const clockOut   = formatTimeCell(row[5]);
       const breakStart = formatTimeCell(row[3]);
       const breakEnd   = formatTimeCell(row[4]);
-      const meal       = row[6] === '有' || row[6] === 1;
+      const meal       = row[6] === '有' || row[6] === 1 || row[6] === true;
       const isPaidLeave = (row[7] === '有給') || false;
-      const remarks    = row[8] || '';
+      const remarks    = (row.length > 8 && row[8]) ? String(row[8]) : '';
 
       const isActuallyPaidLeave = isPaidLeave ||
         (typeof remarks === 'string' && remarks.includes('有給申請'));
 
-      // 11列目（index 10）= clientUpdatedAt（ISO文字列）
-      // 10列目（index 9）= サーバー側更新日時（フォールバック用）
-      let clientUpdatedAt = '';
-      if (row.length > 10 && row[10]) {
-        clientUpdatedAt = String(row[10]);
-      }
-
       // 重複比較用: clientUpdatedAt > サーバー側updatedAt の優先順
       let compareMs = 0;
-      if (clientUpdatedAt) {
-        compareMs = new Date(clientUpdatedAt).getTime() || 0;
-      } else if (row[9] instanceof Date) {
-        compareMs = row[9].getTime();
+      let serverUpdatedAtMs = 0;
+      try {
+        if (row.length > 9 && row[9] instanceof Date) {
+          serverUpdatedAtMs = row[9].getTime();
+        }
+        
+        if (clientUpdatedAt && !isNaN(new Date(clientUpdatedAt).getTime())) {
+          compareMs = new Date(clientUpdatedAt).getTime();
+        } else {
+          compareMs = serverUpdatedAtMs;
+        }
+      } catch (e) {
+        compareMs = 0;
       }
 
       // 12列目（index 11）= deletedフラグ
@@ -181,7 +154,7 @@ function getAllRecords() {
         remarks: remarks,
         additionalBreakMins: 0,
         clientUpdatedAt: clientUpdatedAt || null,
-        serverUpdatedAtMs: (row[9] instanceof Date) ? row[9].getTime() : 0,
+        serverUpdatedAtMs: serverUpdatedAtMs,
         deleted: isDeleted
       };
 
@@ -302,7 +275,6 @@ function writeRecord(ss, record) {
   const lastRow = sheet.getLastRow();
   let targetRow = -1;
   let existingLatestMs = -1; // 既存行のclientUpdatedAt最大値
-  let existingLatestClientUpdatedAt = '';
 
   if (lastRow >= 2) {
     const lastCol = Math.max(sheet.getLastColumn(), 12);
@@ -325,14 +297,13 @@ function writeRecord(ss, record) {
         let existingMs = 0;
         if (existingCuAt) {
           existingMs = new Date(existingCuAt).getTime() || 0;
-        } else if (allData[i][9] instanceof Date) {
+        } else if (allData[i].length > 9 && allData[i][9] instanceof Date) {
           existingMs = allData[i][9].getTime();
         }
 
         if (targetRow === -1 || existingMs > existingLatestMs) {
           targetRow = i + 2;
           existingLatestMs = existingMs;
-          existingLatestClientUpdatedAt = existingCuAt;
         }
       }
     }
@@ -346,6 +317,8 @@ function writeRecord(ss, record) {
   if (targetRow === -1) {
     targetRow = lastRow + 1;
   }
+  
+  if (targetRow < 2) targetRow = 2;
 
   // 曜日を計算
   const dateObj = new Date(parseInt(dateParts[0]), parseInt(dateParts[1]) - 1, parseInt(dateParts[2]));

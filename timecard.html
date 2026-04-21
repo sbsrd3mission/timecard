@@ -1316,7 +1316,7 @@
                             <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold ${gasUrl ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
                                 {gasUrl ? '✅ 連携ON' : '⏸ 未設定'}
                             </span>
-                            {gasUrl && <button onClick={async () => { try { const r = await fetch(gasUrl); const j = await r.json(); alert(j.message || '接続成功！'); } catch(e) { alert('接続テスト失敗: ' + e.message + '\n\n※初回はGASのアクセス許可が必要です。'); } }} className="px-4 py-1.5 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-lg text-xs transition-colors">🔗 接続テスト</button>}
+                            {gasUrl && <button onClick={async () => { try { const r = await fetch(gasUrl + '?action=ping'); const j = await r.json(); alert(j.status === 'ok' ? '✅ 接続成功！GASと正常に通信できています。' : '⚠️ 応答がありましたが想定外です: ' + JSON.stringify(j)); } catch(e) { alert('接続テスト失敗: ' + e.message + '\n\n※初回はGASのアクセス許可が必要です。'); } }} className="px-4 py-1.5 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-lg text-xs transition-colors">🔗 接続テスト</button>}
                             {gasUrl && <button onClick={async () => { const result = await syncFromGAS(); if (result.success) alert('✅ 同期完了！' + result.count + '件のデータを取得しました。'); else alert('❌ 同期失敗: ' + result.message + '\n\nGASの再デプロイが必要な場合があります。手順書をご確認ください。'); }} disabled={syncStatus.state === 'loading'} className="px-4 py-1.5 bg-teal-500 hover:bg-teal-600 disabled:opacity-50 text-white font-bold rounded-lg text-xs transition-colors flex items-center gap-1">{syncStatus.state === 'loading' ? '⏳ 同期中...' : '🔄 今すぐ全データ同期'}</button>}
                         </div>
                         {gasUrl && syncStatus.lastSync && (

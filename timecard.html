@@ -1439,6 +1439,15 @@
                     return;
                 }
 
+                if (type === 'in') {
+                    const lastRecord = timeRecords
+                        .filter(r => r.staffName === selectedStaffName && r.date < dateStr && !r.isPaidLeave)
+                        .sort((a, b) => b.date.localeCompare(a.date))[0];
+                    if (lastRecord && lastRecord.clockIn && !lastRecord.clockOut) {
+                        alert(`前の出勤（${lastRecord.date}）で退勤が押されていません。履歴画面から修正するか、管理者に報告してください。`);
+                    }
+                }
+
                 if (type === 'in' && existingRec?.clockIn) {
                     alert('すでに「出勤」で打刻されています！\n（他の端末で打刻された情報が同期されました）');
                     return;
@@ -1469,6 +1478,8 @@
                             if (input === null) return;
                             additionalBreakPromptMins = parseInt(input) || 0;
                         }
+                    } else {
+                        alert("勤務時間が6時間未満ですが、休憩は取りましたか？\n休憩を取った場合は、下の備考欄に「〇分休憩」と記載してください。");
                     }
                 }
 

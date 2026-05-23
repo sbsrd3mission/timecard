@@ -772,6 +772,30 @@
 
             const handleExportWithTemplate = async () => {
                 try {
+                    // 出力前にクラウド（スプレッドシート）と自動同期を試みる
+                    if (gasUrl) {
+                        try {
+                            const syncRes = await syncFromGAS(gasUrl);
+                            if (!syncRes || !syncRes.success) {
+                                const proceed = window.confirm(
+                                    `【警告】クラウドとの自動同期に失敗しました。\n` +
+                                    `（理由: ${syncRes ? syncRes.message : '通信エラー'}）\n\n` +
+                                    `最新の打刻データが反映されていない可能性があります。\n` +
+                                    `ローカルに保存されている古いデータ（キャッシュ）のままExcelを出力しますか？`
+                                );
+                                if (!proceed) return;
+                            }
+                        } catch (e) {
+                            const proceed = window.confirm(
+                                    `【警告】クラウドとの自動同期中にエラーが発生しました。\n` +
+                                    `（エラー: ${e.message || '不明なエラー'}）\n\n` +
+                                    `最新の打刻データが反映されていない可能性があります。\n` +
+                                    `ローカルに保存されている古いデータ（キャッシュ）のままExcelを出力しますか？`
+                            );
+                            if (!proceed) return;
+                        }
+                    }
+
                     const [yearStr, monthStr] = targetMonth.split('-');
                     const year = parseInt(yearStr);
                     const month = parseInt(monthStr);
@@ -1018,6 +1042,30 @@
             // ===== 外注者専用エクセル出力（給与計算付き）=====
             const handleExportOutsourced = async () => {
                 try {
+                    // 出力前にクラウド（スプレッドシート）と自動同期を試みる
+                    if (gasUrl) {
+                        try {
+                            const syncRes = await syncFromGAS(gasUrl);
+                            if (!syncRes || !syncRes.success) {
+                                const proceed = window.confirm(
+                                    `【警告】クラウドとの自動同期に失敗しました。\n` +
+                                    `（理由: ${syncRes ? syncRes.message : '通信エラー'}）\n\n` +
+                                    `最新の打刻データが反映されていない可能性があります。\n` +
+                                    `ローカルに保存されている古いデータ（キャッシュ）のままExcelを出力しますか？`
+                                );
+                                if (!proceed) return;
+                            }
+                        } catch (e) {
+                            const proceed = window.confirm(
+                                    `【警告】クラウドとの自動同期中にエラーが発生しました。\n` +
+                                    `（エラー: ${e.message || '不明なエラー'}）\n\n` +
+                                    `最新の打刻データが反映されていない可能性があります。\n` +
+                                    `ローカルに保存されている古いデータ（キャッシュ）のままExcelを出力しますか？`
+                            );
+                            if (!proceed) return;
+                        }
+                    }
+
                     const outsourcedStaff = staffList.filter(s => s.isOutsourced);
                     if (outsourcedStaff.length === 0) {
                         alert('外注者が設定されていません。スタッフ設定で「外注者」をONにしてください。');

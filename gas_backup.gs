@@ -72,10 +72,15 @@ function getAllRecords() {
     if (lastRow < 2) return;
 
     // 12列まで取得（日付、曜日、出勤、中抜け、退勤、賄い、有給、備考、更新日時、clientUpdatedAt、削除フラグ）
-    const lastCol = Math.max(sheet.getLastColumn(), 12);
+    // ただし、最大列数(getMaxColumns)を超えて読み込もうとすると境界外エラーになるため、安全な範囲を指定する
+    const lastCol = sheet.getLastColumn();
+    const maxCol = sheet.getMaxColumns();
+    const colsToRead = Math.min(Math.max(lastCol, 1), maxCol, 12);
+    if (colsToRead < 1) return;
+
     let data;
     try {
-      data = sheet.getRange(2, 1, lastRow - 1, Math.min(lastCol, 12)).getValues();
+      data = sheet.getRange(2, 1, lastRow - 1, colsToRead).getValues();
     } catch (e) {
       console.warn('Sheet access error: ' + sheetName, e);
       return;
@@ -262,6 +267,21 @@ function writeRecord(ss, record) {
     sheet.getRange(1, 1, 1, 12).setFontWeight('bold').setBackground('#e8f5e9');
     sheet.setFrozenRows(1);
     sheet.setTabColor('#4caf50');
+  } else {
+    // 既存のシートがあり、最大列数が12列未満の場合は自動的に12列以上に拡張する
+    const currentMaxCols = sheet.getMaxColumns();
+    if (currentMaxCols < 12) {
+      sheet.insertColumnsAfter(currentMaxCols, 12 - currentMaxCols);
+      // 足りないヘッダーを自動補完
+      const headerRange = sheet.getRange(1, currentMaxCols + 1, 1, 12 - currentMaxCols);
+      const allHeaders = [
+        '日付', '曜日', '出勤', '中抜け開始', '中抜け終了', '退勤',
+        '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt', '削除フラグ'
+      ];
+      const missingHeaders = allHeaders.slice(currentMaxCols);
+      headerRange.setValues([missingHeaders]);
+      headerRange.setFontWeight('bold').setBackground('#e8f5e9');
+    }
   }
 
   // スクリプトのタイムゾーンを使って日付比較（GASデプロイ環境に合わせる）
@@ -277,8 +297,17 @@ function writeRecord(ss, record) {
   let existingLatestMs = -1; // 既存行のclientUpdatedAt最大値
 
   if (lastRow >= 2) {
-    const lastCol = Math.max(sheet.getLastColumn(), 12);
-    const allData = sheet.getRange(2, 1, lastRow - 1, Math.min(lastCol, 12)).getValues();
+    const lastCol = sheet.getLastColumn();
+    const maxCol = sheet.getMaxColumns();
+    const colsToRead = Math.min(Math.max(lastCol, 1), maxCol, 12);
+    let allData = [];
+    if (colsToRead >= 1) {
+      try {
+        allData = sheet.getRange(2, 1, lastRow - 1, colsToRead).getValues();
+      } catch (e) {
+        console.warn('Find existing row error in writeRecord: ' + sheetName, e);
+      }
+    }
     for (let i = 0; i < allData.length; i++) {
       const cellDate = allData[i][0];
       let cellDateStr = '';

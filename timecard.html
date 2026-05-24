@@ -487,8 +487,13 @@
                                     </div>
                                     <div className="flex gap-4 items-end">
                                         <div className="flex-1">
-                                            <label className="block text-xs font-bold text-primary mb-1">追加の休憩（分）</label>
+                                            <label className="block text-xs font-bold text-primary mb-1">
+                                                {(breakStart && breakEnd) ? '中抜けとは別の休憩（分）' : 'この日の休憩時間（分）'}
+                                            </label>
                                             <input type="number" value={additionalBreak} onChange={(e) => setAdditionalBreak(e.target.value)} min="0" className="w-full border-2 border-primary/20 rounded-xl p-2 font-bold text-lg focus:border-secondary focus:outline-none" />
+                                            {(breakStart && breakEnd) && (
+                                                <p className="text-[10px] text-primary/50 mt-1">※中抜け時間は含まず、その他に取った休憩分数</p>
+                                            )}
                                         </div>
                                         <label className="flex-1 flex items-center justify-center space-x-2 cursor-pointer border-2 border-primary/20 rounded-xl p-2 hover:bg-surface transition-colors">
                                             <input type="checkbox" checked={meal} onChange={(e) => setMeal(e.target.checked)} className="w-5 h-5 accent-secondary" />
@@ -574,6 +579,7 @@
                                         <td className="p-3 text-center text-primary/30">-</td>
                                         <td className="p-3 text-center text-primary/30">-</td>
                                         <td className="p-3 text-center text-primary/30">-</td>
+                                        <td className="p-3 text-center text-primary/30">-</td>
                                         <td className="p-2 text-center text-sm font-bold text-sky-600 truncate max-w-[100px]" title={record.remarks}>
                                             【有給申請】 {record.remarks}
                                         </td>
@@ -586,8 +592,42 @@
                                         <td className="p-3 text-center font-bold text-primary">{formatTimeHM(record.clockIn) || '-'}</td>
                                         <td className="p-3 text-center font-bold text-[#b45309]">{formatTimeHM(record.clockOut) || '-'}</td>
                                         <td className="p-3 text-center text-xs text-primary/70">
-                                            {formatTimeHM(record.breakStart)}〜{formatTimeHM(record.breakEnd)}
-                                            {record.additionalBreakMins > 0 && <span className="block text-[10px] text-accent">追:{record.additionalBreakMins}分</span>}
+                                            {(record.breakStart && record.breakEnd)
+                                                ? <span>{formatTimeHM(record.breakStart)}〜{formatTimeHM(record.breakEnd)}</span>
+                                                : <span className="text-primary/30">-</span>}
+                                        </td>
+                                        <td className="p-3 text-center text-xs">
+                                            {(() => {
+                                                if (!record.clockOut) return <span className="text-primary/20">-</span>;
+                                                const addMins = parseInt(record.additionalBreakMins) || 0;
+                                                const hasMiddleBreak = record.breakStart && record.breakEnd;
+
+                                                // 中抜け時間（分）を計算
+                                                let middleBreakMins = 0;
+                                                if (hasMiddleBreak) {
+                                                    const mbSec = calculateDuration(record.breakStart, record.breakEnd);
+                                                    middleBreakMins = Math.round(mbSec / 60);
+                                                }
+
+                                                const totalMins = middleBreakMins + addMins;
+
+                                                if (addMins > 0) {
+                                                    // ユーザーが入力あり → 合計をオレンジで表示
+                                                    return <span className="font-bold text-accent">{totalMins}分</span>;
+                                                }
+                                                if (hasMiddleBreak) {
+                                                    // 中抜けのみ → 中抜け時間をグレーで表示
+                                                    return <span className="text-primary/50">{middleBreakMins}分</span>;
+                                                }
+                                                // 中抜けなし・additionalBreakMins=0 → 旧データ対応で自動推定
+                                                if (record.clockIn) {
+                                                    const workSec = calculateDuration(record.clockIn, record.clockOut);
+                                                    if (workSec >= 6 * 3600) {
+                                                        return <span className="text-primary/50">45分</span>;
+                                                    }
+                                                }
+                                                return <span className="text-primary/40">0分</span>;
+                                            })()}
                                         </td>
                                         <td className="p-3 text-center">{record.meal ? '🥗' : '-'}</td>
                                         <td className="p-2 text-xs truncate max-w-[100px] text-gray-500 relative">
@@ -603,6 +643,7 @@
                                 )
                             ) : (
                                 <>
+                                    <td className="p-3"></td>
                                     <td className="p-3"></td>
                                     <td className="p-3"></td>
                                     <td className="p-3"></td>
@@ -665,7 +706,8 @@
                                         <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-24">日付</th>
                                         <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-20">出勤</th>
                                         <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-20">退勤</th>
-                                        <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-24">中抜け・休憩</th>
+                                        <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-20">中抜け</th>
+                                        <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-16">休憩</th>
                                         <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-16">賄い</th>
                                         <th className="p-3 font-bold text-sm text-primary whitespace-nowrap max-w-[150px]">備考・ログ</th>
                                         <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-32">操作</th>
@@ -852,7 +894,7 @@
                         for (let d = 1; d <= 31; d++) {
                             const row = ws.getRow(startRow + d - 1);
                             // 全書き込み対象セルをクリア
-                            [1,2,3,4,5,6,7,16].forEach(c => { row.getCell(c).value = null; });
+                            [1,2,3,4,5,6,7,11,16].forEach(c => { row.getCell(c).value = null; });
 
                             if (d <= daysInMonth) {
                                 const targetDateObj = new Date(year, month - 1, d);
@@ -923,7 +965,7 @@
 
                                 for (let d = 1; d <= 31; d++) {
                                     const r = ws.getRow(sRow + d - 1);
-                                    [1,2,3,4,5,6,7,16].forEach(c => { r.getCell(c).value = null; });
+                                    [1,2,3,4,5,6,7,11,16].forEach(c => { r.getCell(c).value = null; });
                                     if (d <= daysInMonth) {
                                         const tDateObj = new Date(year, month - 1, d);
                                         const dVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
@@ -991,6 +1033,34 @@
                                         row.getCell(5).value = timeToExcelFraction(record.breakEnd);
                                     }
                                     row.getCell(16).value = remarks || null;
+
+                                    // K列(col11)に合計休憩時間を書き込む
+                                    if (record.clockIn && record.clockOut) {
+                                        const addMins = parseInt(record.additionalBreakMins) || 0;
+                                        let middleBreakMins = 0;
+                                        if (record.breakStart && record.breakEnd) {
+                                            const bsF = timeToExcelFraction(record.breakStart);
+                                            const beF = timeToExcelFraction(record.breakEnd);
+                                            if (bsF !== null && beF !== null) {
+                                                middleBreakMins = Math.round((beF - bsF) * 24 * 60);
+                                            }
+                                        }
+                                        let totalBreakMins = middleBreakMins + addMins;
+                                        // 旧データ対応: additionalBreakMins=0かつ中抜けなしの場合は6時間ルールを適用
+                                        if (totalBreakMins === 0) {
+                                            const ciF = timeToExcelFraction(record.clockIn);
+                                            const coF = timeToExcelFraction(record.clockOut);
+                                            if (ciF !== null && coF !== null) {
+                                                let workFrac = coF - ciF;
+                                                if (workFrac < 0) workFrac += 1;
+                                                if (workFrac >= 6 / 24) totalBreakMins = 45;
+                                            }
+                                        }
+                                        if (totalBreakMins >= 0) {
+                                            row.getCell(11).value = totalBreakMins / 60 / 24;
+                                            row.getCell(11).numFmt = 'h:mm';
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1121,7 +1191,7 @@
                         if (startRow === -1) return;
                         for (let d = 1; d <= 31; d++) {
                             const row = ws.getRow(startRow + d - 1);
-                            [1,2,3,4,5,6,7,16].forEach(c => { row.getCell(c).value = null; });
+                            [1,2,3,4,5,6,7,11,16].forEach(c => { row.getCell(c).value = null; });
                             if (d <= daysInMonth) {
                                 const targetDateObj = new Date(year, month - 1, d);
                                 const dateVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
@@ -1178,7 +1248,7 @@
 
                                 for (let d = 1; d <= 31; d++) {
                                     const r = ws.getRow(sRow + d - 1);
-                                    [1,2,3,4,5,6,7,16].forEach(c => { r.getCell(c).value = null; });
+                                    [1,2,3,4,5,6,7,11,16].forEach(c => { r.getCell(c).value = null; });
                                     if (d <= daysInMonth) {
                                         const tDateObj = new Date(year, month - 1, d);
                                         const dVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
@@ -1231,7 +1301,33 @@
                                 }
                                 row.getCell(16).value = remarks || null;
 
+                                // K列(col11)に合計休憩時間を書き込む
                                 if (record.clockIn && record.clockOut) {
+                                    const addMins = parseInt(record.additionalBreakMins) || 0;
+                                    let middleBreakMins = 0;
+                                    if (record.breakStart && record.breakEnd) {
+                                        const bsF = timeToExcelFraction(record.breakStart);
+                                        const beF = timeToExcelFraction(record.breakEnd);
+                                        if (bsF !== null && beF !== null) {
+                                            middleBreakMins = Math.round((beF - bsF) * 24 * 60);
+                                        }
+                                    }
+                                    let totalBreakMins = middleBreakMins + addMins;
+                                    // 旧データ対応: additionalBreakMins=0かつ中抜けなしの場合は6時間ルールを適用
+                                    if (totalBreakMins === 0) {
+                                        const ciF = timeToExcelFraction(record.clockIn);
+                                        const coF = timeToExcelFraction(record.clockOut);
+                                        if (ciF !== null && coF !== null) {
+                                            let workFrac = coF - ciF;
+                                            if (workFrac < 0) workFrac += 1;
+                                            if (workFrac >= 6 / 24) totalBreakMins = 45;
+                                        }
+                                    }
+                                    if (totalBreakMins >= 0) {
+                                        row.getCell(11).value = totalBreakMins / 60 / 24;
+                                        row.getCell(11).numFmt = 'h:mm';
+                                    }
+
                                     const ci = timeToExcelFraction(record.clockIn);
                                     const co = timeToExcelFraction(record.clockOut);
                                     const bs = timeToExcelFraction(record.breakStart);
@@ -1527,7 +1623,9 @@
                             additionalBreakPromptMins = parseInt(input) || 0;
                         }
                     } else {
-                        alert("勤務時間が6時間未満ですが、休憩は取りましたか？\n休憩を取った場合は、下の備考欄に「〇分休憩」と記載してください。");
+                        const input = window.prompt("勤務時間が6時間未満です。\n休憩を取った場合は分数を入力してください。\n（取っていない場合は「0」のままOKを押してください）", "0");
+                        if (input === null) return;
+                        additionalBreakPromptMins = parseInt(input) || 0;
                     }
                 }
 
@@ -1550,7 +1648,10 @@
 
                     if (type === 'out' || type === 'update_info') {
                         if (remarks) updated.remarks = updated.remarks ? updated.remarks + ' / ' + remarks : remarks;
-                        if (additionalBreakPromptMins > 0) updated.additionalBreakMins = additionalBreakPromptMins;
+                    }
+                    // 退勤時は休憩分数を必ず確定保存（0分も含む）
+                    if (type === 'out') {
+                        updated.additionalBreakMins = additionalBreakPromptMins;
                     }
 
                     // clientUpdatedAt を付与（同期時の競合解決に使用）

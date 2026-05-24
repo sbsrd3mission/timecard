@@ -75,7 +75,7 @@ function getAllRecords() {
     // ただし、最大列数(getMaxColumns)を超えて読み込もうとすると境界外エラーになるため、安全な範囲を指定する
     const lastCol = sheet.getLastColumn();
     const maxCol = sheet.getMaxColumns();
-    const colsToRead = Math.min(Math.max(lastCol, 1), maxCol, 12);
+    const colsToRead = Math.min(Math.max(lastCol, 1), maxCol, 13);
     if (colsToRead < 1) return;
 
     let data;
@@ -119,6 +119,7 @@ function getAllRecords() {
       const meal       = row[6] === '有' || row[6] === 1 || row[6] === true;
       const isPaidLeave = (row[7] === '有給') || false;
       const remarks    = (row.length > 8 && row[8]) ? String(row[8]) : '';
+      const additionalBreakMins = (row.length > 12 && row[12] !== '' && row[12] !== null) ? (parseInt(row[12]) || 0) : 0;
 
       const isActuallyPaidLeave = isPaidLeave ||
         (typeof remarks === 'string' && remarks.includes('有給申請'));
@@ -157,7 +158,7 @@ function getAllRecords() {
         meal: meal,
         isPaidLeave: isActuallyPaidLeave,
         remarks: remarks,
-        additionalBreakMins: 0,
+        additionalBreakMins: additionalBreakMins,
         clientUpdatedAt: clientUpdatedAt || null,
         serverUpdatedAtMs: serverUpdatedAtMs,
         deleted: isDeleted
@@ -260,23 +261,23 @@ function writeRecord(ss, record) {
   let sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
     sheet = ss.insertSheet(sheetName);
-    sheet.getRange(1, 1, 1, 12).setValues([[
+    sheet.getRange(1, 1, 1, 13).setValues([[
       '日付', '曜日', '出勤', '中抜け開始', '中抜け終了', '退勤',
-      '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt', '削除フラグ'
+      '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt', '削除フラグ', '休憩分数'
     ]]);
-    sheet.getRange(1, 1, 1, 12).setFontWeight('bold').setBackground('#e8f5e9');
+    sheet.getRange(1, 1, 1, 13).setFontWeight('bold').setBackground('#e8f5e9');
     sheet.setFrozenRows(1);
     sheet.setTabColor('#4caf50');
   } else {
-    // 既存のシートがあり、最大列数が12列未満の場合は自動的に12列以上に拡張する
+    // 既存のシートがあり、最大列数が13列未満の場合は自動的に13列以上に拡張する
     const currentMaxCols = sheet.getMaxColumns();
-    if (currentMaxCols < 12) {
-      sheet.insertColumnsAfter(currentMaxCols, 12 - currentMaxCols);
+    if (currentMaxCols < 13) {
+      sheet.insertColumnsAfter(currentMaxCols, 13 - currentMaxCols);
       // 足りないヘッダーを自動補完
-      const headerRange = sheet.getRange(1, currentMaxCols + 1, 1, 12 - currentMaxCols);
+      const headerRange = sheet.getRange(1, currentMaxCols + 1, 1, 13 - currentMaxCols);
       const allHeaders = [
         '日付', '曜日', '出勤', '中抜け開始', '中抜け終了', '退勤',
-        '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt', '削除フラグ'
+        '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt', '削除フラグ', '休憩分数'
       ];
       const missingHeaders = allHeaders.slice(currentMaxCols);
       headerRange.setValues([missingHeaders]);
@@ -299,7 +300,7 @@ function writeRecord(ss, record) {
   if (lastRow >= 2) {
     const lastCol = sheet.getLastColumn();
     const maxCol = sheet.getMaxColumns();
-    const colsToRead = Math.min(Math.max(lastCol, 1), maxCol, 12);
+    const colsToRead = Math.min(Math.max(lastCol, 1), maxCol, 13);
     let allData = [];
     if (colsToRead >= 1) {
       try {
@@ -355,7 +356,7 @@ function writeRecord(ss, record) {
   const dow = dowNames[dateObj.getDay()];
 
   // フロントエンドは常にレコードの全フィールドを送信するため、
-  // 受け取ったデータをそのまま書き込む（12列に拡張: 削除フラグ）
+  // 受け取ったデータをそのまま書き込む（13列に拡張: 休憩分数）
   const rowData = [
     dateStr,
     dow,
@@ -368,10 +369,11 @@ function writeRecord(ss, record) {
     record.remarks || '',
     new Date(),
     incomingClientUpdatedAt,
-    record.deleted ? 'true' : ''
+    record.deleted ? 'true' : '',
+    (record.additionalBreakMins !== undefined && record.additionalBreakMins !== null) ? record.additionalBreakMins : 0
   ];
 
-  sheet.getRange(targetRow, 1, 1, 12).setValues([rowData]);
+  sheet.getRange(targetRow, 1, 1, 13).setValues([rowData]);
 }
 
 // ===== 設定情報の操作 =====

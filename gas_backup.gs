@@ -119,7 +119,12 @@ function getAllRecords() {
       const meal       = row[6] === '有' || row[6] === 1 || row[6] === true;
       const isPaidLeave = (row[7] === '有給') || false;
       const remarks    = (row.length > 8 && row[8]) ? String(row[8]) : '';
-      const additionalBreakMins = (row.length > 12 && row[12] !== '' && row[12] !== null) ? (parseInt(row[12]) || 0) : 0;
+      // 列13（休憩分数）: 空セルはnullを返す（旧データと明示的な0を区別するため）
+      let additionalBreakMins = null;
+      if (row.length > 12 && row[12] !== '' && row[12] !== null && row[12] !== undefined) {
+        const parsed = parseInt(row[12]);
+        additionalBreakMins = isNaN(parsed) ? null : parsed;
+      }
 
       const isActuallyPaidLeave = isPaidLeave ||
         (typeof remarks === 'string' && remarks.includes('有給申請'));

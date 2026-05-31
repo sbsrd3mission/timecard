@@ -620,6 +620,10 @@
                                                     return <span className="text-primary/50">{middleBreakMins}分</span>;
                                                 }
                                                 // 中抜けなし・additionalBreakMins=0 → 旧データ対応で自動推定
+                                                // ただし additionalBreakMins が明示的に存在する場合（0含む）は旧データではないのでそのまま0分表示
+                                                if (record.additionalBreakMins !== undefined && record.additionalBreakMins !== null) {
+                                                    return <span className="text-primary/40">0分</span>;
+                                                }
                                                 if (record.clockIn) {
                                                     const workSec = calculateDuration(record.clockIn, record.clockOut);
                                                     if (workSec >= 6 * 3600) {
@@ -1046,8 +1050,9 @@
                                             }
                                         }
                                         let totalBreakMins = middleBreakMins + addMins;
-                                        // 旧データ対応: additionalBreakMins=0かつ中抜けなしの場合は6時間ルールを適用
-                                        if (totalBreakMins === 0) {
+                                        // 旧データ対応: additionalBreakMinsフィールドが存在しない(undefined/null)かつ中抜けなしの場合のみ6時間ルールを適用
+                                        // additionalBreakMinsが明示的に0の場合はユーザーが入力した値なのでそのまま
+                                        if (totalBreakMins === 0 && (record.additionalBreakMins === undefined || record.additionalBreakMins === null)) {
                                             const ciF = timeToExcelFraction(record.clockIn);
                                             const coF = timeToExcelFraction(record.clockOut);
                                             if (ciF !== null && coF !== null) {
@@ -1313,8 +1318,9 @@
                                         }
                                     }
                                     let totalBreakMins = middleBreakMins + addMins;
-                                    // 旧データ対応: additionalBreakMins=0かつ中抜けなしの場合は6時間ルールを適用
-                                    if (totalBreakMins === 0) {
+                                    // 旧データ対応: additionalBreakMinsフィールドが存在しない(undefined/null)かつ中抜けなしの場合のみ6時間ルールを適用
+                                    // additionalBreakMinsが明示的に0の場合はユーザーが入力した値なのでそのまま
+                                    if (totalBreakMins === 0 && (record.additionalBreakMins === undefined || record.additionalBreakMins === null)) {
                                         const ciF = timeToExcelFraction(record.clockIn);
                                         const coF = timeToExcelFraction(record.clockOut);
                                         if (ciF !== null && coF !== null) {

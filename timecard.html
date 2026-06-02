@@ -1024,10 +1024,7 @@
                                     // 中抜け欄は実際の打刻データのみ記入
                                     row.getCell(4).value = timeToExcelFraction(record.breakStart);
                                     row.getCell(5).value = timeToExcelFraction(record.breakEnd);
-                                    // 休憩合計分数を備考に記載
-                                    if (record.additionalBreakMins > 0) {
-                                        remarks += (remarks ? ' / ' : '') + `休憩合計：${record.additionalBreakMins}分`;
-                                    }
+
                                     row.getCell(16).value = remarks || null;
 
                                     // K列(col11)に合計休憩時間を書き込む
@@ -1284,10 +1281,7 @@
                                 // 中抜け欄は実際の打刻データのみ記入
                                 row.getCell(4).value = timeToExcelFraction(record.breakStart);
                                 row.getCell(5).value = timeToExcelFraction(record.breakEnd);
-                                // 追加休憩分数を備考に記載
-                                if (record.additionalBreakMins > 0) {
-                                    remarks += (remarks ? ' / ' : '') + `追加休憩：${record.additionalBreakMins}分`;
-                                }
+
                                 row.getCell(16).value = remarks || null;
 
                                 // K列(col11)に合計休憩時間を書き込む

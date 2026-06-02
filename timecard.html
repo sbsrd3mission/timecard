@@ -1021,20 +1021,12 @@
                                     row.getCell(7).value = record.meal ? 1 : null;
 
                                     let remarks = record.remarks || '';
+                                    // 中抜け欄は実際の打刻データのみ記入
+                                    row.getCell(4).value = timeToExcelFraction(record.breakStart);
+                                    row.getCell(5).value = timeToExcelFraction(record.breakEnd);
+                                    // 休憩合計分数を備考に記載
                                     if (record.additionalBreakMins > 0) {
-                                        if (!record.breakStart && !record.breakEnd) {
-                                            row.getCell(4).value = timeToExcelFraction('12:00:00');
-                                            const endH = 12 + Math.floor(record.additionalBreakMins / 60);
-                                            const endM = record.additionalBreakMins % 60;
-                                            row.getCell(5).value = timeToExcelFraction(`${String(endH).padStart(2,'0')}:${String(endM).padStart(2,'0')}:00`);
-                                        } else {
-                                            row.getCell(4).value = timeToExcelFraction(record.breakStart);
-                                            row.getCell(5).value = timeToExcelFraction(record.breakEnd);
-                                            remarks += (remarks ? ' / ' : '') + `追加個別休憩：${record.additionalBreakMins}分`;
-                                        }
-                                    } else {
-                                        row.getCell(4).value = timeToExcelFraction(record.breakStart);
-                                        row.getCell(5).value = timeToExcelFraction(record.breakEnd);
+                                        remarks += (remarks ? ' / ' : '') + `休憩合計：${record.additionalBreakMins}分`;
                                     }
                                     row.getCell(16).value = remarks || null;
 
@@ -1289,20 +1281,12 @@
                                 // 賄い（col 7）は外注者なので書かない
 
                                 let remarks = record.remarks || '';
+                                // 中抜け欄は実際の打刻データのみ記入
+                                row.getCell(4).value = timeToExcelFraction(record.breakStart);
+                                row.getCell(5).value = timeToExcelFraction(record.breakEnd);
+                                // 追加休憩分数を備考に記載
                                 if (record.additionalBreakMins > 0) {
-                                    if (!record.breakStart && !record.breakEnd) {
-                                        row.getCell(4).value = timeToExcelFraction('12:00:00');
-                                        const endH = 12 + Math.floor(record.additionalBreakMins / 60);
-                                        const endM = record.additionalBreakMins % 60;
-                                        row.getCell(5).value = timeToExcelFraction(`${String(endH).padStart(2,'0')}:${String(endM).padStart(2,'0')}:00`);
-                                    } else {
-                                        row.getCell(4).value = timeToExcelFraction(record.breakStart);
-                                        row.getCell(5).value = timeToExcelFraction(record.breakEnd);
-                                        remarks += (remarks ? ' / ' : '') + `追加個別休憩：${record.additionalBreakMins}分`;
-                                    }
-                                } else {
-                                    row.getCell(4).value = timeToExcelFraction(record.breakStart);
-                                    row.getCell(5).value = timeToExcelFraction(record.breakEnd);
+                                    remarks += (remarks ? ' / ' : '') + `追加休憩：${record.additionalBreakMins}分`;
                                 }
                                 row.getCell(16).value = remarks || null;
 
@@ -1617,10 +1601,17 @@
 
                 if (type === 'out' && existingRec?.clockIn) {
                     const workSec = calculateDuration(existingRec.clockIn, timeStr);
+                    const hasMiddleBreak = !!(existingRec.breakStart && existingRec.breakEnd);
                     if (workSec >= 6 * 3600) {
-                        const hasMiddleBreak = !!(existingRec.breakStart && existingRec.breakEnd);
                         if (hasMiddleBreak) {
-                            const input = window.prompt("中抜けの打刻を確認しました。\n中抜けとは別に休憩を取りましたか？\n（取った分数を半角数字で、取っていない場合は「0」を入力）", "45");
+                            const middleSec = calculateDuration(existingRec.breakStart, existingRec.breakEnd);
+                            const middleMins = Math.round(middleSec / 60);
+                            const input = window.prompt(
+                                `中抜け打刻を確認しました（中抜け ${middleMins}分）。\n` +
+                                `中抜けとは別に休憩を取りましたか？\n` +
+                                `（取った追加の分数を半角数字で、取っていない場合は「0」を入力）`, 
+                                "45"
+                            );
                             if (input === null) return;
                             additionalBreakPromptMins = parseInt(input) || 0;
                         } else {
@@ -1629,9 +1620,22 @@
                             additionalBreakPromptMins = parseInt(input) || 0;
                         }
                     } else {
-                        const input = window.prompt("勤務時間が6時間未満です。\n休憩を取った場合は分数を入力してください。\n（取っていない場合は「0」のままOKを押してください）", "0");
-                        if (input === null) return;
-                        additionalBreakPromptMins = parseInt(input) || 0;
+                        if (hasMiddleBreak) {
+                            const middleSec = calculateDuration(existingRec.breakStart, existingRec.breakEnd);
+                            const middleMins = Math.round(middleSec / 60);
+                            const input = window.prompt(
+                                `中抜け打刻を確認しました（中抜け ${middleMins}分）。\n` +
+                                `中抜けとは別に休憩を取りましたか？\n` +
+                                `（取った追加の分数を半角数字で、取っていない場合は「0」を入力）`,
+                                "0"
+                            );
+                            if (input === null) return;
+                            additionalBreakPromptMins = parseInt(input) || 0;
+                        } else {
+                            const input = window.prompt("勤務時間が6時間未満です。\n休憩を取った場合は分数を入力してください。\n（取っていない場合は「0」のままOKを押してください）", "0");
+                            if (input === null) return;
+                            additionalBreakPromptMins = parseInt(input) || 0;
+                        }
                     }
                 }
 

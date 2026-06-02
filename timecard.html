@@ -1319,7 +1319,7 @@
                                     let workFrac = co - ci;
                                     if (workFrac < 0) workFrac += 1;
                                     if (bs && be) workFrac -= (be - bs);
-                                    const breakDeduct = workFrac > (6 / 24) ? (30 / 1440) : 0;
+                                    const breakDeduct = totalBreakMins > 0 ? (totalBreakMins / 1440) : 0;
                                     totalCalcFrac += Math.max(0, workFrac - breakDeduct);
                                     totalDays++;
                                 }

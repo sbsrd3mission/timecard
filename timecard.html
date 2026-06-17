@@ -1536,6 +1536,7 @@
 
             const [historyStaffName, setHistoryStaffName] = useState('');
             const [historyIsAdminMode, setHistoryIsAdminMode] = useState(false);
+            const [showHealthCheck, setShowHealthCheck] = useState(false);
             
             const handleAdminClick = () => {
                 if (view === 'punch') {
@@ -1551,7 +1552,13 @@
                 }
             };
 
-            const handlePunch = (type) => {
+            // 健康チェック確認後に実際の出勤打刻を行う
+            const handlePunchAfterCheck = () => {
+                setShowHealthCheck(false);
+                handlePunch('in', true); // skipHealthCheck=true で再呼び出し
+            };
+
+            const handlePunch = (type, skipHealthCheck = false) => {
                 if (!selectedStaffName) return;
 
                 const now = new Date();
@@ -1567,13 +1574,17 @@
                     return;
                 }
 
-                if (type === 'in') {
+                if (type === 'in' && !skipHealthCheck) {
+                    // 前回の退勤漏れチェック
                     const lastRecord = timeRecords
                         .filter(r => r.staffName === selectedStaffName && r.date < dateStr && !r.isPaidLeave)
                         .sort((a, b) => b.date.localeCompare(a.date))[0];
                     if (lastRecord && lastRecord.clockIn && !lastRecord.clockOut) {
                         alert(`前の出勤（${lastRecord.date}）で退勤が押されていません。履歴画面から修正するか、管理者に報告してください。`);
                     }
+                    // 健康チェックポップアップを表示（表示のみ・記録しない）
+                    setShowHealthCheck(true);
+                    return;
                 }
 
                 if (type === 'in' && existingRec?.clockIn) {
@@ -1749,6 +1760,48 @@
 
             return (
                 <div className="min-h-screen flex flex-col items-center py-6 px-4">
+                    {/* 健康チェックモーダル（表示のみ・記録なし） */}
+                    {showHealthCheck && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay animate-fade-in" onClick={() => setShowHealthCheck(false)}>
+                            <div className="bg-white rounded-3xl shadow-2xl p-6 mx-4 w-full max-w-sm border-4 border-secondary/50" onClick={e => e.stopPropagation()}>
+                                <div className="text-center mb-5">
+                                    <div className="text-4xl mb-2">🌿</div>
+                                    <h2 className="text-xl font-bold text-primary">出勤前の健康チェック</h2>
+                                    <p className="text-sm text-primary/60 mt-1">以下の項目を確認してから出勤してください</p>
+                                </div>
+                                <ul className="space-y-3 mb-6">
+                                    <li className="flex items-start gap-3 bg-secondary/10 rounded-xl p-3">
+                                        <span className="text-xl mt-0.5">✅</span>
+                                        <span className="text-primary font-bold text-base">体調は万全ですか？</span>
+                                    </li>
+                                    <li className="flex items-start gap-3 bg-secondary/10 rounded-xl p-3">
+                                        <span className="text-xl mt-0.5">✅</span>
+                                        <span className="text-primary font-bold text-base">腹痛や嘔吐の症状はないですか？</span>
+                                    </li>
+                                    <li className="flex items-start gap-3 bg-secondary/10 rounded-xl p-3">
+                                        <span className="text-xl mt-0.5">✅</span>
+                                        <span className="text-primary font-bold text-base">爪切りや身だしなみは大丈夫ですか？</span>
+                                    </li>
+                                </ul>
+                                <div className="flex flex-col gap-2">
+                                    <button
+                                        id="health-check-confirm-btn"
+                                        onClick={handlePunchAfterCheck}
+                                        className="w-full bg-gradient-to-br from-secondary to-[#65a30d] text-white font-bold py-4 rounded-2xl text-lg shadow-md active:scale-95 transition-all border-b-4 border-[#4d7c0f]"
+                                    >
+                                        ✔ 確認しました　出勤する
+                                    </button>
+                                    <button
+                                        id="health-check-cancel-btn"
+                                        onClick={() => setShowHealthCheck(false)}
+                                        className="w-full bg-gray-100 text-gray-500 font-bold py-3 rounded-2xl text-sm active:scale-95 transition-all border border-gray-200"
+                                    >
+                                        キャンセル
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                     <div className="w-full max-w-lg mb-6 flex flex-col items-center">
                         <div className="flex justify-center items-end gap-6 mb-2">
                             <img src="./コレトちゃん.avif" alt="コレトちゃん" className="h-20 w-auto object-contain drop-shadow-md" onError={(e) => e.target.style.display='none'} />

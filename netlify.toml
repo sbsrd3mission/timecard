@@ -5,6 +5,7 @@
 
 [build]
   publish = "."
+  ignore = "true"
 
 [[redirects]]
   from = "/"

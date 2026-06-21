@@ -67,7 +67,7 @@
         const useAppData = () => {
             const [staffList, setStaffList] = useState(() => {
                 const withDefaults = (s) => {
-                    const base = typeof s === 'string' ? { name: s, defaultMeal: true } : s;
+                    const base = typeof s === 'string' ? { name: s, defaultMeal: false } : s;
                     return { isOutsourced: false, hourlyRate: 1200, dailyTransport: 0, ...base };
                 };
                 const saved = localStorage.getItem('timecard_staff_v2');
@@ -78,7 +78,7 @@
                     return JSON.parse(oldSaved).map(withDefaults);
                 }
                 return ["草野", "田中", "小出", "高橋", "小田", "林", "山田", "市川（悠）", "谷口", "森川", "五十嵐", "市川（公）"].map(name => ({
-                    name, defaultMeal: true, isOutsourced: false, hourlyRate: 1200, dailyTransport: 0
+                    name, defaultMeal: false, isOutsourced: false, hourlyRate: 1200, dailyTransport: 0
                 }));
             });
 
@@ -104,6 +104,17 @@
             useEffect(() => { localStorage.setItem('timecard_records', JSON.stringify(timeRecords)); }, [timeRecords]);
             useEffect(() => { localStorage.setItem('admin_pin', adminPin); }, [adminPin]);
             useEffect(() => { localStorage.setItem('timecard_gas_url', gasUrl); }, [gasUrl]);
+
+            // 既存スタッフの賄い設定を一括で「なし (false)」にリセットする1回限りのマイグレーション
+            useEffect(() => {
+                const migrated = localStorage.getItem('timecard_meal_reset_20260621');
+                if (!migrated && staffList.length > 0) {
+                    const updatedList = staffList.map(s => ({ ...s, defaultMeal: false }));
+                    setStaffList(updatedList);
+                    saveSettingsToGAS(updatedList, adminPin);
+                    localStorage.setItem('timecard_meal_reset_20260621', 'true');
+                }
+            }, []);
 
             // ===== 設定の同期（スタッフリスト、PINコード） =====
             const saveSettingsToGAS = async (newList, newPin) => {
@@ -135,7 +146,7 @@
                         if (data.settings.staffList) {
                             // GASから取得したスタッフリストにもデフォルト値を付与（旧形式データ対応）
                             const withDefaults = (s) => {
-                                const base = typeof s === 'string' ? { name: s, defaultMeal: true } : s;
+                                const base = typeof s === 'string' ? { name: s, defaultMeal: false } : s;
                                 return { isOutsourced: false, hourlyRate: 1200, dailyTransport: 0, ...base };
                             };
                             setStaffList(data.settings.staffList.map(withDefaults));
@@ -758,7 +769,7 @@
 
             const handleAddStaff = () => {
                 if (newStaffName && !staffList.find(s => s.name === newStaffName)) {
-                    const newList = [...staffList, { name: newStaffName, defaultMeal: true, isOutsourced: false, hourlyRate: 1200, dailyTransport: 0 }];
+                    const newList = [...staffList, { name: newStaffName, defaultMeal: false, isOutsourced: false, hourlyRate: 1200, dailyTransport: 0 }];
                     setStaffList(newList);
                     saveSettingsToGAS(newList, adminPin);
                     setNewStaffName('');
@@ -1687,7 +1698,7 @@
             useEffect(() => {
                 if (selectedStaffName) {
                     const staffData = staffList.find(s => s.name === selectedStaffName);
-                    const defaultMeal = staffData ? staffData.defaultMeal : true;
+                    const defaultMeal = staffData ? staffData.defaultMeal : false;
                     const dateStr = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`;
                     const record = timeRecords.find(r => r.id === `${selectedStaffName}_${dateStr}`);
                     if (record && record.meal !== undefined && record.clockIn) setHasMeal(record.meal);

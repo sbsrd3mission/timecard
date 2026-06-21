@@ -1544,6 +1544,8 @@
             const [selectedStaffName, setSelectedStaffName] = useState('');
             const [remarks, setRemarks] = useState('');
             const [hasMeal, setHasMeal] = useState(false);
+            const [isMealDirty, setIsMealDirty] = useState(false);
+            const [isRemarksDirty, setIsRemarksDirty] = useState(false);
 
             const [historyStaffName, setHistoryStaffName] = useState('');
             const [historyIsAdminMode, setHistoryIsAdminMode] = useState(false);
@@ -1701,11 +1703,17 @@
                     const defaultMeal = staffData ? staffData.defaultMeal : false;
                     const dateStr = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`;
                     const record = timeRecords.find(r => r.id === `${selectedStaffName}_${dateStr}`);
-                    if (record && record.meal !== undefined && record.clockIn) setHasMeal(record.meal);
-                    else setHasMeal(defaultMeal);
-                    setRemarks('');
+                    
+                    if (!isMealDirty) {
+                        if (record && record.meal !== undefined && record.clockIn) setHasMeal(record.meal);
+                        else setHasMeal(defaultMeal);
+                    }
+                    if (!isRemarksDirty) {
+                        if (record && record.remarks !== undefined) setRemarks(record.remarks);
+                        else setRemarks('');
+                    }
                 }
-            }, [selectedStaffName, timeRecords, staffList]);
+            }, [selectedStaffName, timeRecords, staffList, isMealDirty, isRemarksDirty]);
 
             const changeView = (newView) => { setView(newView); document.body.scrollTop = 0; };
 
@@ -1842,6 +1850,8 @@
                                         <select value={selectedStaffName} onChange={(e) => {
                                             const newName = e.target.value;
                                             setSelectedStaffName(newName);
+                                            setIsMealDirty(false);
+                                            setIsRemarksDirty(false);
                                             if (newName && gasUrl) syncFromGAS(gasUrl, false);
                                         }} className="w-full appearance-none bg-white border-[3px] border-secondary/50 text-primary py-4 px-4 pr-10 rounded-2xl focus:border-secondary transition-all text-xl font-bold shadow-sm">
                                             <option value="">-- おなまえ --</option>
@@ -1868,11 +1878,11 @@
                                     <div className="text-left">
                                         <div className="bg-white/80 rounded-2xl p-4 border-2 border-primary/10 mb-2 shadow-sm">
                                             <label className="flex items-center space-x-3 cursor-pointer mb-5 p-2 bg-surface rounded-xl border border-primary/10 hover:bg-white transition-colors">
-                                                <input type="checkbox" checked={hasMeal} onChange={(e) => setHasMeal(e.target.checked)} className="w-7 h-7 accent-secondary cursor-pointer" />
+                                                <input type="checkbox" checked={hasMeal} onChange={(e) => { setHasMeal(e.target.checked); setIsMealDirty(true); }} className="w-7 h-7 accent-secondary cursor-pointer" />
                                                 <span className="text-primary font-bold text-lg">🥗 賄いあり</span>
                                             </label>
                                             <label className="block text-sm font-bold text-primary mb-2">📝 備考（フリーコメント）</label>
-                                            <input type="text" value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="例：交通費〇〇円 など" className="w-full border-2 border-primary/20 p-3 rounded-xl focus:border-secondary transition-colors" />
+                                            <input type="text" value={remarks} onChange={(e) => { setRemarks(e.target.value); setIsRemarksDirty(true); }} placeholder="例：交通費〇〇円 など" className="w-full border-2 border-primary/20 p-3 rounded-xl focus:border-secondary transition-colors" />
                                         </div>
                                         <div className="flex justify-end mt-2"><button onClick={() => handlePunch('update_info')} className="text-sm bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 py-2 px-5 rounded-xl font-bold transition-colors shadow-sm">情報のみ保存</button></div>
                                     </div>

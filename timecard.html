@@ -64,7 +64,7 @@
         const CloseIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>;
 
         // --- データ管理（LocalStorage） ---
-        const useAppData = () => {
+        const useAppData = (onError) => {
             const [staffList, setStaffList] = useState(() => {
                 const withDefaults = (s) => {
                     const base = typeof s === 'string' ? { name: s, defaultMeal: false } : s;
@@ -153,17 +153,6 @@
                         }
                         if (data.settings.adminPin) setAdminPin(data.settings.adminPin);
                         console.log('Settings synced from GAS');
-                    } else if (data.status === 'ok' && !data.settings) {
-                        // GASに設定がない場合、このデバイスのローカル設定をGASに保存する
-                        const localList = JSON.parse(localStorage.getItem('timecard_staff_v2') || '[]');
-                        const localPin = localStorage.getItem('admin_pin') || '0000';
-                        if (localList.length > 0) {
-                            fetch(targetUrl, {
-                                method: 'POST', mode: 'no-cors',
-                                headers: { 'Content-Type': 'text/plain' },
-                                body: JSON.stringify({ action: 'saveSettings', settings: { staffList: localList, adminPin: localPin } })
-                            }).then(() => console.log('Local settings pushed to GAS'));
-                        }
                     }
                 } catch(e) { console.error('Sync settings failed', e); }
             };
@@ -199,6 +188,8 @@
                         pending.push(record);
                     }
                     localStorage.setItem('timecard_pending_sync', JSON.stringify(pending));
+                    // エラーをUIに通知
+                    if (onError) onError('SYNC_FAIL', `クラウドへの保存に失敗しました。打刻はこの端末には記録されています。\n管理者に「SYNC_FAIL」のエラーが出たとご連絡ください。\n（詳細: ${e.message || '不明'}）`);
                 }
             };
 
@@ -333,6 +324,8 @@
                 } catch(e) {
                     const msg = e.message || '不明なエラー';
                     setSyncStatus(s => ({ ...s, state: 'error', message: '同期失敗: ' + msg }));
+                    // サイレントモードでない場合のみUIエラーを表示（3秒ポーリングでのエラーはスパムにならないよう抑制）
+                    if (!silent && onError) onError('FETCH_FAIL', `最新データの取得に失敗しました。打刻は続けられます。\n管理者に「FETCH_FAIL」のエラーが出たとご連絡ください。\n（詳細: ${msg}）`);
                     return { success: false, message: msg };
                 }
             };
@@ -1538,7 +1531,19 @@
 
         // --- メインアプリ ---
         const App = () => {
-            const { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, saveSettingsToGAS, syncSettingsFromGAS, syncStatus } = useAppData();
+            // ===== エラーバナー管理 =====
+            const [appErrors, setAppErrors] = useState([]);
+            const addAppError = (code, message) => {
+                const id = Date.now();
+                setAppErrors(prev => {
+                    // 同じコードのエラーが既にある場合は追加しない（スパム防止）
+                    if (prev.some(e => e.code === code)) return prev;
+                    return [...prev, { id, code, message, time: new Date().toLocaleTimeString('ja-JP') }];
+                });
+            };
+            const dismissError = (id) => setAppErrors(prev => prev.filter(e => e.id !== id));
+
+            const { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, saveSettingsToGAS, syncSettingsFromGAS, syncStatus } = useAppData(addAppError);
             const [view, setView] = useState('punch'); 
             
             const [selectedStaffName, setSelectedStaffName] = useState('');
@@ -1550,6 +1555,16 @@
             const [historyStaffName, setHistoryStaffName] = useState('');
             const [historyIsAdminMode, setHistoryIsAdminMode] = useState(false);
             const [showHealthCheck, setShowHealthCheck] = useState(false);
+
+            // スタッフリストが空になった場合の警告（起動後2秒後に確認）
+            useEffect(() => {
+                const timer = setTimeout(() => {
+                    if (gasUrl && staffList.length === 0) {
+                        addAppError('STAFF_EMPTY', 'スタッフ情報が読み込めませんでした。\n管理者に「STAFF_EMPTY」のエラーが出たとご連絡ください。\nページを再読み込みすると解消する場合があります。');
+                    }
+                }, 2000);
+                return () => clearTimeout(timer);
+            }, [staffList, gasUrl]);
             
             const handleAdminClick = () => {
                 if (view === 'punch') {
@@ -1779,10 +1794,34 @@
 
             return (
                 <div className="min-h-screen flex flex-col items-center py-6 px-4">
+                    {/* エラーバナー */}
+                    {appErrors.length > 0 && (
+                        <div className="fixed top-0 left-0 right-0 z-[60] flex flex-col gap-2 p-3 pointer-events-none">
+                            {appErrors.map(err => (
+                                <div key={err.id} className="pointer-events-auto w-full max-w-lg mx-auto bg-red-600 text-white rounded-xl shadow-2xl border-2 border-red-800 p-4 animate-fade-in">
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div className="flex-1">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <span className="text-lg">⚠️</span>
+                                                <span className="font-bold text-sm bg-red-800 px-2 py-0.5 rounded">{err.code}</span>
+                                                <span className="text-xs text-red-200">{err.time}</span>
+                                            </div>
+                                            <p className="text-sm font-bold whitespace-pre-line leading-relaxed">{err.message}</p>
+                                            <button
+                                                onClick={() => { setHistoryStaffName(selectedStaffName || (staffList[0] && staffList[0].name) || ''); setHistoryIsAdminMode(false); changeView('history'); dismissError(err.id); }}
+                                                className="mt-2 inline-block text-xs bg-white/20 hover:bg-white/30 border border-white/40 text-white font-bold px-3 py-1.5 rounded-lg transition-colors"
+                                            >📋 打刻履歴から修正する</button>
+                                        </div>
+                                        <button onClick={() => dismissError(err.id)} className="text-white/80 hover:text-white text-xl font-bold leading-none shrink-0 mt-0.5">×</button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                     {/* 健康チェックモーダル（表示のみ・記録なし） */}
                     {showHealthCheck && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay animate-fade-in" onClick={() => setShowHealthCheck(false)}>
-                            <div className="bg-white rounded-3xl shadow-2xl p-6 mx-4 w-full max-w-sm border-4 border-secondary/50" onClick={e => e.stopPropagation()}>
+                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay animate-fade-in">
+                            <div className="bg-white rounded-3xl shadow-2xl p-6 mx-4 w-full max-w-sm border-4 border-secondary/50">
                                 <div className="text-center mb-5">
                                     <div className="text-4xl mb-2">🌿</div>
                                     <h2 className="text-xl font-bold text-primary">出勤前の健康チェック</h2>

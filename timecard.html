@@ -92,9 +92,16 @@
                 return localStorage.getItem('admin_pin') || '0000';
             });
 
-            // GAS連携URL
+            // GAS連携URL（新デプロイへの自動マイグレーション対応）
             const [gasUrl, setGasUrl] = useState(() => {
-                return localStorage.getItem('timecard_gas_url') || '';
+                const stored = localStorage.getItem('timecard_gas_url') || '';
+                const oldUrl = 'https://script.google.com/macros/s/AKfycbxdy63wj7Fvsp87koV7b8tOsXlnoUOkioeP1KdvwAfMZEkZTSKWzQZWaiju6UUuQqDnJA/exec';
+                const newUrl = 'https://script.google.com/macros/s/AKfycbwrNlgzheRC5cZ3cFx6lMpduJqTFTvS1F5qevRl1MRGkymYdF49OzxTixlck7SAjMzbeg/exec';
+                if (!stored || stored === oldUrl) {
+                    localStorage.setItem('timecard_gas_url', newUrl);
+                    return newUrl;
+                }
+                return stored;
             });
 
             // 同期ステータス

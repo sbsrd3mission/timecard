@@ -30,19 +30,32 @@ function doPost(e) {
 
   const action = postData.action;
 
-  if (action === 'record') {
-    writeRecord(ss, postData);
-    return createJsonResponse({ status: 'ok' });
-  } else if (action === 'sync') {
-    const records = postData.records || [];
-    records.forEach(r => writeRecord(ss, r));
-    return createJsonResponse({ status: 'ok', count: records.length });
-  } else if (action === 'delete') {
-    deleteRecord(ss, postData.id);
-    return createJsonResponse({ status: 'ok' });
-  } else if (action === 'saveSettings') {
-    saveSettings(ss, postData.settings);
-    return createJsonResponse({ status: 'ok' });
+  // ===== 排他制御（ロック機能）の追加 =====
+  // 複数のPCからの通信が重なった際、最大10秒間待機して順番に確実に処理する
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (err) {
+    return createJsonResponse({ status: 'error', message: 'Server busy. Please try again.' });
+  }
+
+  try {
+    if (action === 'record') {
+      writeRecord(ss, postData);
+      return createJsonResponse({ status: 'ok' });
+    } else if (action === 'sync') {
+      const records = postData.records || [];
+      records.forEach(r => writeRecord(ss, r));
+      return createJsonResponse({ status: 'ok', count: records.length });
+    } else if (action === 'delete') {
+      deleteRecord(ss, postData.id);
+      return createJsonResponse({ status: 'ok' });
+    } else if (action === 'saveSettings') {
+      saveSettings(ss, postData.settings);
+      return createJsonResponse({ status: 'ok' });
+    }
+  } finally {
+    lock.releaseLock();
   }
 
   return createJsonResponse({ status: 'error', message: 'Invalid action' });

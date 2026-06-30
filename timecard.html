@@ -92,12 +92,11 @@
                 return localStorage.getItem('admin_pin') || '0000';
             });
 
-            // GAS連携URL（新デプロイへの自動マイグレーション対応）
+            // GAS連携URL（最新デプロイへの確実な自動マイグレーション対応）
             const [gasUrl, setGasUrl] = useState(() => {
-                const stored = localStorage.getItem('timecard_gas_url') || '';
-                const oldUrl = 'https://script.google.com/macros/s/AKfycbxdy63wj7Fvsp87koV7b8tOsXlnoUOkioeP1KdvwAfMZEkZTSKWzQZWaiju6UUuQqDnJA/exec';
                 const newUrl = 'https://script.google.com/macros/s/AKfycbwrNlgzheRC5cZ3cFx6lMpduJqTFTvS1F5qevRl1MRGkymYdF49OzxTixlck7SAjMzbeg/exec';
-                if (!stored || stored === oldUrl) {
+                const stored = localStorage.getItem('timecard_gas_url') || '';
+                if (stored !== newUrl) {
                     localStorage.setItem('timecard_gas_url', newUrl);
                     return newUrl;
                 }
@@ -246,7 +245,17 @@
                 try {
                     const cb = '&t=' + Date.now();
                     const response = await fetch(targetUrl + '?action=getAll' + cb, { method: 'GET', cache: 'no-store' });
-                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    if (!response.ok) {
+                        if (response.status === 404) {
+                            const fallbackUrl = 'https://script.google.com/macros/s/AKfycbwrNlgzheRC5cZ3cFx6lMpduJqTFTvS1F5qevRl1MRGkymYdF49OzxTixlck7SAjMzbeg/exec';
+                            if (targetUrl !== fallbackUrl) {
+                                setGasUrl(fallbackUrl);
+                                localStorage.setItem('timecard_gas_url', fallbackUrl);
+                                return syncFromGAS(fallbackUrl, silent);
+                            }
+                        }
+                        throw new Error('HTTP ' + response.status);
+                    }
                     const data = await response.json();
                     if (data.status !== 'ok') throw new Error(data.message || '不明なエラー');
 

@@ -51,8 +51,8 @@ function doPost(e) {
       deleteRecord(ss, postData.id);
       return createJsonResponse({ status: 'ok' });
     } else if (action === 'saveSettings') {
-      saveSettings(ss, postData.settings);
-      return createJsonResponse({ status: 'ok' });
+      const result = saveSettings(ss, postData.settings);
+      return createJsonResponse(result);
     }
   } finally {
     lock.releaseLock();
@@ -420,7 +420,71 @@ function getSettings(ss) {
   return settings;
 }
 
+// フロントエンドのローカル初期値名簿（仮データ）。この名簿での上書き要求はサーバー側でも拒否する。
+// （障害⑥: 初期値キャッシュの端末から本番AppSettingsが上書きされた事故の再発防止・二重防御）
+const DEFAULT_SEED_NAMES = ["草野", "田中", "小出", "高橋", "小田", "林", "山田", "市川（悠）", "谷口", "森川", "五十嵐", "市川（公）"];
+
+function isDefaultSeedList(list) {
+  if (!Array.isArray(list) || list.length !== DEFAULT_SEED_NAMES.length) return false;
+  const names = list.map(function(s) {
+    return (typeof s === 'string') ? s : ((s && s.name) || '');
+  }).sort();
+  const seed = DEFAULT_SEED_NAMES.slice().sort();
+  return names.every(function(n, i) { return n === seed[i]; });
+}
+
+// 受信した設定のバリデーション。不正なら理由文字列を返し、正常なら null を返す
+function validateIncomingSettings(ss, settings) {
+  if (!settings || typeof settings !== 'object') {
+    return '設定オブジェクトが不正です';
+  }
+  if (settings.staffList !== undefined) {
+    if (!Array.isArray(settings.staffList)) {
+      return 'staffListが配列ではありません';
+    }
+    if (settings.staffList.length === 0) {
+      return 'staffListが空です（全削除は手動でのみ許可）';
+    }
+    const hasInvalid = settings.staffList.some(function(s) {
+      const name = (typeof s === 'string') ? s : ((s && s.name) || '');
+      return !name || typeof name !== 'string' || !name.trim();
+    });
+    if (hasInvalid) {
+      return 'staffListに名前が欠損した要素が含まれています';
+    }
+    if (isDefaultSeedList(settings.staffList)) {
+      return '初期値名簿（仮データ）による上書きは禁止されています';
+    }
+    // 大幅減少ガード: 現名簿10名以上に対し、半数未満への縮小要求は誤送信とみなして拒否
+    const current = getSettings(ss);
+    if (current && Array.isArray(current.staffList) && current.staffList.length >= 10) {
+      if (settings.staffList.length < current.staffList.length / 2) {
+        return '現在の名簿(' + current.staffList.length + '名)から' + settings.staffList.length +
+               '名への大幅減少要求のため拒否しました（誤送信保護）';
+      }
+    }
+  }
+  return null;
+}
+
 function saveSettings(ss, settings) {
+  // ===== サーバー側バリデーション（本番データ保護の最終防衛線） =====
+  const validationError = validateIncomingSettings(ss, settings);
+  if (validationError) {
+    console.warn('saveSettings rejected: ' + validationError);
+    return { status: 'rejected', message: validationError };
+  }
+
+  // ===== 上書き前の現行設定を履歴シートへ退避（ロールバック用） =====
+  try {
+    const previous = getSettings(ss);
+    if (previous && previous.staffList && previous.staffList.length > 0) {
+      appendSettingsHistory(ss, previous, '[上書き前の自動退避]');
+    }
+  } catch(e) {
+    console.error('Pre-save backup failed:', e);
+  }
+
   let sheet = ss.getSheetByName(SETTINGS_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(SETTINGS_SHEET_NAME);
@@ -438,4 +502,45 @@ function saveSettings(ss, settings) {
     sheet.getRange(1, 2, rows.length, 1).setNumberFormat('@');
     range.setValues(rows);
   }
+
+  // ===== 設定変更履歴シートへの自動記録 =====
+  try {
+    appendSettingsHistory(ss, settings, '');
+  } catch(e) {
+    console.error('Settings backup history failed:', e);
+  }
+
+  return { status: 'ok' };
+}
+
+// 履歴シート（AppSettingsHistory）への追記共通処理
+function appendSettingsHistory(ss, settings, note) {
+  const HISTORY_SHEET_NAME = 'AppSettingsHistory';
+  let historySheet = ss.getSheetByName(HISTORY_SHEET_NAME);
+  if (!historySheet) {
+    historySheet = ss.insertSheet(HISTORY_SHEET_NAME);
+    historySheet.setTabColor('#4caf50');
+    historySheet.appendRow(['バックアップ日時', 'スタッフ人数', 'スタッフ一覧JSON', '管理者PIN']);
+    historySheet.getRange(1, 1, 1, 4).setFontWeight('bold').setBackground('#e8f5e9');
+  }
+  const count = settings.staffList ? settings.staffList.length : 0;
+  const jsonStr = settings.staffList ? JSON.stringify(settings.staffList) : '';
+  historySheet.appendRow([
+    Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss') + (note ? ' ' + note : ''),
+    count + '名',
+    jsonStr,
+    settings.adminPin || ''
+  ]);
+}
+
+/**
+ * 毎日自動で現在の設定を履歴バックアップシートに記録する定期実行用関数
+ * ※ GASの「トリガー」画面から、この関数を毎日（例: 深夜〜早朝）実行するよう設定可能です。
+ */
+function recordDailySettingsBackup() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const settings = getSettings(ss);
+  if (!settings || !settings.staffList) return;
+  
+  appendSettingsHistory(ss, settings, '[毎日自動バックアップ]');
 }

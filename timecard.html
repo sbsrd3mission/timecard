@@ -64,28 +64,54 @@
         const CloseIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>;
 
         // --- データ管理（LocalStorage） ---
+        // localStorage の JSON が破損していてもアプリがクラッシュしないよう安全にパースする
+        const safeParseJSON = (str, fallback) => {
+            if (!str) return fallback;
+            try {
+                const parsed = JSON.parse(str);
+                return parsed === null || parsed === undefined ? fallback : parsed;
+            } catch (e) {
+                console.warn('safeParseJSON: 破損データを検出したためフォールバックを使用', e);
+                return fallback;
+            }
+        };
+
+        // ローカル開発用の初期値名簿（仮データ）。
+        // ※ この名簿はクラウド(AppSettings)へ絶対に送信してはならない（障害⑥: 初期値による本番上書き対策）
+        const DEFAULT_SEED_NAMES = ["草野", "田中", "小出", "高橋", "小田", "林", "山田", "市川（悠）", "谷口", "森川", "五十嵐", "市川（公）"];
+        const isDefaultSeedList = (list) => {
+            if (!Array.isArray(list) || list.length !== DEFAULT_SEED_NAMES.length) return false;
+            const names = list.map(s => (typeof s === 'string' ? s : (s && s.name) || '')).sort();
+            const seed = [...DEFAULT_SEED_NAMES].sort();
+            return names.every((n, i) => n === seed[i]);
+        };
+
         const useAppData = (onError) => {
             const [staffList, setStaffList] = useState(() => {
                 const withDefaults = (s) => {
                     const base = typeof s === 'string' ? { name: s, defaultMeal: false } : s;
                     return { isOutsourced: false, hourlyRate: 1200, dailyTransport: 0, ...base };
                 };
-                const saved = localStorage.getItem('timecard_staff_v2');
-                if (saved) return JSON.parse(saved).map(withDefaults);
+                const saved = safeParseJSON(localStorage.getItem('timecard_staff_v2'), null);
+                if (Array.isArray(saved) && saved.length > 0) return saved.map(withDefaults);
 
-                const oldSaved = localStorage.getItem('timecard_staff');
-                if (oldSaved) {
-                    return JSON.parse(oldSaved).map(withDefaults);
+                const oldSaved = safeParseJSON(localStorage.getItem('timecard_staff'), null);
+                if (Array.isArray(oldSaved) && oldSaved.length > 0) {
+                    return oldSaved.map(withDefaults);
                 }
-                return ["草野", "田中", "小出", "高橋", "小田", "林", "山田", "市川（悠）", "谷口", "森川", "五十嵐", "市川（公）"].map(name => ({
+                return DEFAULT_SEED_NAMES.map(name => ({
                     name, defaultMeal: false, isOutsourced: false, hourlyRate: 1200, dailyTransport: 0
                 }));
             });
 
             const [timeRecords, setTimeRecords] = useState(() => {
-                const saved = localStorage.getItem('timecard_records');
-                return saved ? JSON.parse(saved) : [];
+                const saved = safeParseJSON(localStorage.getItem('timecard_records'), []);
+                return Array.isArray(saved) ? saved : [];
             });
+
+            // クラウド(GAS)から設定を一度でも正常受信できたかのフラグ。
+            // これが立つまでは設定のクラウド保存(saveSettingsToGAS)を一切許可しない（障害⑥対策の中核ガード）
+            const settingsHydratedRef = useRef(localStorage.getItem('timecard_settings_hydrated') === 'true');
 
             // パスワード設定（デフォルトは 0000）
             const [adminPin, setAdminPin] = useState(() => {
@@ -112,30 +138,51 @@
             useEffect(() => { localStorage.setItem('timecard_gas_url', gasUrl); }, [gasUrl]);
 
             // 既存スタッフの賄い設定を一括で「なし (false)」にリセットする1回限りのマイグレーション
+            // 【障害⑥対策】新しい端末（初期値名簿のまま）ではローカル変更のみ行い、クラウドへは絶対に送信しない。
+            // クラウド送信はGASから正規の設定を受信済み（hydrated）の端末に限定する。
             useEffect(() => {
                 const migrated = localStorage.getItem('timecard_meal_reset_20260621');
                 if (!migrated && staffList.length > 0) {
                     const updatedList = staffList.map(s => ({ ...s, defaultMeal: false }));
                     setStaffList(updatedList);
-                    saveSettingsToGAS(updatedList, adminPin);
+                    if (settingsHydratedRef.current && !isDefaultSeedList(updatedList)) {
+                        saveSettingsToGAS(updatedList, adminPin);
+                    }
                     localStorage.setItem('timecard_meal_reset_20260621', 'true');
                 }
             }, []);
 
             // ===== 設定の同期（スタッフリスト、PINコード） =====
+            // 【障害⑥対策ガード】以下の場合はクラウド保存を拒否する:
+            //   1. 名簿が空・不正型（同期異常でStateが壊れた場合の防波堤）
+            //   2. 名簿が初期値（仮データ）そのもの → 本番を初期値で上書きする事故を根絶
+            //   3. クラウドから一度も設定を受信していない端末（新端末・キャッシュクリア直後）
             const saveSettingsToGAS = async (newList, newPin) => {
                 if (!gasUrl) return;
+                const listToSave = newList || staffList;
+                if (!Array.isArray(listToSave) || listToSave.length === 0) {
+                    console.warn('saveSettingsToGAS: 名簿が空のため保存を拒否しました');
+                    return;
+                }
+                if (isDefaultSeedList(listToSave)) {
+                    console.warn('saveSettingsToGAS: 初期値名簿（仮データ）のため保存を拒否しました（障害⑥ガード）');
+                    return;
+                }
+                if (!settingsHydratedRef.current) {
+                    console.warn('saveSettingsToGAS: クラウド設定が未受信の端末のため保存を拒否しました（障害⑥ガード）');
+                    return;
+                }
                 try {
                     await fetch(gasUrl, {
                         method: 'POST',
                         mode: 'no-cors',
                         headers: { 'Content-Type': 'text/plain' },
-                        body: JSON.stringify({ 
-                            action: 'saveSettings', 
-                            settings: { 
-                                staffList: newList || staffList, 
-                                adminPin: newPin || adminPin 
-                            } 
+                        body: JSON.stringify({
+                            action: 'saveSettings',
+                            settings: {
+                                staffList: listToSave,
+                                adminPin: newPin || adminPin
+                            }
                         })
                     });
                 } catch(e) { console.error('Save settings failed', e); }
@@ -148,16 +195,32 @@
                     const response = await fetch(targetUrl + '?action=getSettings', { method: 'GET' });
                     if (!response.ok) return;
                     const data = await response.json();
-                    if (data.status === 'ok' && data.settings) {
-                        if (data.settings.staffList) {
-                            // GASから取得したスタッフリストにもデフォルト値を付与（旧形式データ対応）
+                    if (data && data.status === 'ok') {
+                        // クラウドと正常に疎通し設定応答を受信できた時点で hydrated フラグを立てる
+                        // （設定が未作成 = null の場合も「クラウドの正しい状態を確認済み」とみなす）
+                        settingsHydratedRef.current = true;
+                        localStorage.setItem('timecard_settings_hydrated', 'true');
+                    }
+                    if (data && data.status === 'ok' && data.settings) {
+                        // 【型バリデーション】配列であり、有効な名前を持つ要素が1件以上ある場合のみStateへ反映。
+                        // 空配列・不正型はStateを破壊しないため無視する（障害①③類似パターン対策）
+                        if (Array.isArray(data.settings.staffList)) {
                             const withDefaults = (s) => {
                                 const base = typeof s === 'string' ? { name: s, defaultMeal: false } : s;
                                 return { isOutsourced: false, hourlyRate: 1200, dailyTransport: 0, ...base };
                             };
-                            setStaffList(data.settings.staffList.map(withDefaults));
+                            const validList = data.settings.staffList
+                                .filter(s => (typeof s === 'string' && s.trim()) || (s && typeof s === 'object' && typeof s.name === 'string' && s.name.trim()))
+                                .map(withDefaults);
+                            if (validList.length > 0) {
+                                setStaffList(validList);
+                            } else {
+                                console.warn('syncSettingsFromGAS: クラウドの名簿が空または不正のため反映をスキップしました');
+                            }
                         }
-                        if (data.settings.adminPin) setAdminPin(data.settings.adminPin);
+                        if (data.settings.adminPin && /^\d{4}$/.test(String(data.settings.adminPin))) {
+                            setAdminPin(String(data.settings.adminPin));
+                        }
                         console.log('Settings synced from GAS');
                     }
                 } catch(e) { console.error('Sync settings failed', e); }
@@ -173,6 +236,20 @@
                 // clientUpdatedAt が無い場合は付与（安全弁）
                 if (!record.clientUpdatedAt) record.clientUpdatedAt = new Date().toISOString();
                 localStorage.setItem('timecard_local_update_time', Date.now().toString());
+
+                // 【キューファースト方式】送信前に必ず未送信キューへ登録する。
+                // no-corsモードではサーバー側の成否を読めないため、fetch成功だけではキューから消さず、
+                // 次回の同期(syncFromGAS)でクラウドに実データが反映されたのを確認してから削除する（確認ベース削除）。
+                // これにより通信断・サーバーエラー・途中切断のどのパターンでも打刻データが欠落しない。
+                const pending = safeParseJSON(localStorage.getItem('timecard_pending_sync'), []);
+                const existingIdx = pending.findIndex(p => p && p.id === record.id);
+                if (existingIdx >= 0) {
+                    pending[existingIdx] = record; // 最新データで上書き
+                } else {
+                    pending.push(record);
+                }
+                localStorage.setItem('timecard_pending_sync', JSON.stringify(pending));
+
                 try {
                     await fetch(gasUrl, {
                         method: 'POST',
@@ -180,20 +257,9 @@
                         headers: { 'Content-Type': 'text/plain' },
                         body: JSON.stringify({ action: 'record', ...record })
                     });
-                    // no-corsモードではレスポンスを読めない
-                    const pending = JSON.parse(localStorage.getItem('timecard_pending_sync') || '[]');
-                    const updated = pending.filter(p => p.id !== record.id);
-                    localStorage.setItem('timecard_pending_sync', JSON.stringify(updated));
+                    // no-corsモードではレスポンスを読めないため、ここではキューを消さない（同期時に確認して削除）
                 } catch(e) {
-                    // 送信失敗 → 未送信リストに追加
-                    const pending = JSON.parse(localStorage.getItem('timecard_pending_sync') || '[]');
-                    const existingIdx = pending.findIndex(p => p.id === record.id);
-                    if (existingIdx >= 0) {
-                        pending[existingIdx] = record; // 最新データで上書き
-                    } else {
-                        pending.push(record);
-                    }
-                    localStorage.setItem('timecard_pending_sync', JSON.stringify(pending));
+                    // 送信失敗 → キューには登録済みなので次回同期時に自動再送される
                     // エラーをUIに通知
                     if (onError) onError('SYNC_FAIL', `クラウドへの保存に失敗しました。打刻はこの端末には記録されています。\n管理者に「SYNC_FAIL」のエラーが出たとご連絡ください。\n（詳細: ${e.message || '不明'}）`);
                 }
@@ -201,7 +267,10 @@
 
             const deleteFromGAS = async (recordId) => {
                 if (!gasUrl) return;
-                const [staff, dStr] = recordId.split('_');
+                // スタッフ名に「_」が含まれても正しく分割できるよう、末尾の日付部分で分離する
+                const parts = String(recordId).match(/^(.+)_(\d{4}-\d{2}-\d{2})$/);
+                if (!parts) { console.warn('deleteFromGAS: 不正なID形式', recordId); return; }
+                const staff = parts[1], dStr = parts[2];
                 const deleteRecord = {
                     id: recordId,
                     staffName: staff,
@@ -217,7 +286,7 @@
             const retrySendPending = async (url) => {
                 const targetUrl = url || gasUrl;
                 if (!targetUrl) return;
-                const pending = JSON.parse(localStorage.getItem('timecard_pending_sync') || '[]');
+                const pending = safeParseJSON(localStorage.getItem('timecard_pending_sync'), []);
                 if (pending.length === 0) return;
                 try {
                     await fetch(targetUrl, {
@@ -226,7 +295,8 @@
                         headers: { 'Content-Type': 'text/plain' },
                         body: JSON.stringify({ action: 'sync', records: pending })
                     });
-                    localStorage.setItem('timecard_pending_sync', '[]');
+                    // 【確認ベース削除】no-corsでは成否を読めないため、ここでは消さない。
+                    // 次回の syncFromGAS でクラウド反映を確認したものだけがキューから削除される。
                 } catch(e) { /* 次回再試行 */ }
             };
 
@@ -265,10 +335,26 @@
                         return { success: true, count: 0, merged: [], message: '通信中にローカル更新が起きたためスキップ' };
                     }
 
-                    const gasRecords = data.records || [];
+                    // 【型バリデーション】不正型・null・ID欠損レコードを除外してからマージ（障害①対策の強化）
+                    const gasRecords = (Array.isArray(data.records) ? data.records : [])
+                        .filter(r => r && typeof r === 'object' && typeof r.id === 'string' && r.id);
 
-                    // 未送信リスト（ローカル優先）
-                    const pending = JSON.parse(localStorage.getItem('timecard_pending_sync') || '[]');
+                    // 【確認ベースのキュー削除】クラウドに反映済み（クラウド側の clientUpdatedAt がキューの値以上）の
+                    // レコードだけを未送信キューから削除する。未反映のものはキューに残し、後段で再送する。
+                    const cloudCheckMap = {};
+                    gasRecords.forEach(r => { if (r && r.id) cloudCheckMap[r.id] = r; });
+                    const rawPending = safeParseJSON(localStorage.getItem('timecard_pending_sync'), []);
+                    const pending = rawPending.filter(p => {
+                        if (!p || !p.id) return false; // 不正エントリは破棄
+                        const cloud = cloudCheckMap[p.id];
+                        if (!cloud) return true; // クラウド未反映 → キューに残す
+                        const pTs = (p.clientUpdatedAt && !isNaN(new Date(p.clientUpdatedAt).getTime())) ? new Date(p.clientUpdatedAt).getTime() : 0;
+                        const cTs = (cloud.clientUpdatedAt && !isNaN(new Date(cloud.clientUpdatedAt).getTime())) ? new Date(cloud.clientUpdatedAt).getTime() : 0;
+                        return cTs < pTs; // クラウドが古い → まだ未反映なのでキューに残す
+                    });
+                    if (pending.length !== rawPending.length) {
+                        localStorage.setItem('timecard_pending_sync', JSON.stringify(pending));
+                    }
                     const pendingMap = {};
                     pending.forEach(p => { pendingMap[p.id] = p; });
 

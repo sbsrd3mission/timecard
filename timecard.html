@@ -1993,7 +1993,8 @@
                                             setSelectedStaffName(newName);
                                             setIsMealDirty(false);
                                             setIsRemarksDirty(false);
-                                            if (newName && gasUrl) syncFromGAS(gasUrl, false);
+                                            // silent=true: 画面には既にローカルデータが表示済みのため、同期は裏で実行し操作をブロックしない
+                                            if (newName && gasUrl) syncFromGAS(gasUrl, true);
                                         }} className="w-full appearance-none bg-white border-[3px] border-secondary/50 text-primary py-4 px-4 pr-10 rounded-2xl focus:border-secondary transition-all text-xl font-bold shadow-sm">
                                             <option value="">-- おなまえ --</option>
                                             {staffList.map(staff => <option key={staff.name} value={staff.name}>{staff.name}</option>)}

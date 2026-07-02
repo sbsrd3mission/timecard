@@ -3,11 +3,26 @@
  * スプレッドシートをDBとして使用します。
  */
 
+// ===== 全件取得キャッシュ =====
+// 全シート読み込み（5〜6秒）の結果を短時間だけサーバー側に記憶して応答を高速化する。
+// 打刻・削除などの書き込みがあった瞬間に破棄するため、古いデータが返り続けることはない。
+const RECORDS_CACHE_KEY = 'getAll_cache_v1';
+const RECORDS_CACHE_SECONDS = 15;
+
 function doGet(e) {
   const action = e.parameter.action;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
   if (action === 'getAll') {
+    try {
+      const cached = CacheService.getScriptCache().get(RECORDS_CACHE_KEY);
+      if (cached) {
+        return ContentService.createTextOutput(cached)
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+    } catch (err) {
+      // キャッシュ障害時は通常処理にフォールバック（動作は従来と同一）
+    }
     return getAllRecords();
   } else if (action === 'getSettings') {
     const settings = getSettings(ss);
@@ -42,13 +57,16 @@ function doPost(e) {
   try {
     if (action === 'record') {
       writeRecord(ss, postData);
+      invalidateRecordsCache();
       return createJsonResponse({ status: 'ok' });
     } else if (action === 'sync') {
       const records = postData.records || [];
       records.forEach(r => writeRecord(ss, r));
+      invalidateRecordsCache();
       return createJsonResponse({ status: 'ok', count: records.length });
     } else if (action === 'delete') {
       deleteRecord(ss, postData.id);
+      invalidateRecordsCache();
       return createJsonResponse({ status: 'ok' });
     } else if (action === 'saveSettings') {
       const result = saveSettings(ss, postData.settings);
@@ -197,12 +215,31 @@ function getAllRecords() {
     return rec;
   });
 
-  return createJsonResponse({
+  const payload = JSON.stringify({
     status: 'ok',
     count: allRecords.length,
     records: allRecords,
     timestamp: new Date().toISOString()
   });
+
+  // 結果を短時間キャッシュ（100KB超過などで保存できない場合は黙ってスキップ＝従来動作）
+  try {
+    CacheService.getScriptCache().put(RECORDS_CACHE_KEY, payload, RECORDS_CACHE_SECONDS);
+  } catch (err) {
+    // キャッシュ保存失敗は無視（動作に影響なし）
+  }
+
+  return ContentService.createTextOutput(payload)
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// 書き込み発生時にキャッシュを即座に破棄する（古いデータが返るのを防ぐ）
+function invalidateRecordsCache() {
+  try {
+    CacheService.getScriptCache().remove(RECORDS_CACHE_KEY);
+  } catch (err) {
+    // 破棄失敗時も最大15秒で自然消滅するため致命的ではない
+  }
 }
 
 // ===== 時刻セルを "HH:MM:SS" 文字列に変換 =====

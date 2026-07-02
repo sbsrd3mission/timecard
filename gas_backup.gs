@@ -14,14 +14,10 @@ function doGet(e) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
   if (action === 'getAll') {
-    try {
-      const cached = CacheService.getScriptCache().get(RECORDS_CACHE_KEY);
-      if (cached) {
-        return ContentService.createTextOutput(cached)
-          .setMimeType(ContentService.MimeType.JSON);
-      }
-    } catch (err) {
-      // キャッシュ障害時は通常処理にフォールバック（動作は従来と同一）
+    const cached = getRecordsCache();
+    if (cached) {
+      return ContentService.createTextOutput(cached)
+        .setMimeType(ContentService.MimeType.JSON);
     }
     return getAllRecords();
   } else if (action === 'getSettings') {
@@ -222,21 +218,60 @@ function getAllRecords() {
     timestamp: new Date().toISOString()
   });
 
-  // 結果を短時間キャッシュ（100KB超過などで保存できない場合は黙ってスキップ＝従来動作）
-  try {
-    CacheService.getScriptCache().put(RECORDS_CACHE_KEY, payload, RECORDS_CACHE_SECONDS);
-  } catch (err) {
-    // キャッシュ保存失敗は無視（動作に影響なし）
-  }
+  // 結果を短時間キャッシュ（保存できない場合は黙ってスキップ＝従来動作）
+  putRecordsCache(payload);
 
   return ContentService.createTextOutput(payload)
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+// ===== キャッシュ分割保存 =====
+// CacheServiceは1キーあたり100KBまでしか保存できないため、
+// 応答JSON（現在135KB超）を90KBずつのチャンクに分割して保存・復元する。
+function putRecordsCache(payload) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const CHUNK_SIZE = 90000;
+    const entries = {};
+    let n = 0;
+    for (let i = 0; i < payload.length; i += CHUNK_SIZE) {
+      entries[RECORDS_CACHE_KEY + '_' + n] = payload.substring(i, i + CHUNK_SIZE);
+      n++;
+    }
+    entries[RECORDS_CACHE_KEY + '_meta'] = String(n);
+    cache.putAll(entries, RECORDS_CACHE_SECONDS);
+  } catch (err) {
+    // キャッシュ保存失敗は無視（動作に影響なし）
+  }
+}
+
+function getRecordsCache() {
+  try {
+    const cache = CacheService.getScriptCache();
+    const meta = cache.get(RECORDS_CACHE_KEY + '_meta');
+    if (!meta) return null;
+    const n = parseInt(meta);
+    if (!n || n < 1) return null;
+    const keys = [];
+    for (let i = 0; i < n; i++) keys.push(RECORDS_CACHE_KEY + '_' + i);
+    const parts = cache.getAll(keys);
+    let out = '';
+    for (let i = 0; i < n; i++) {
+      const p = parts[RECORDS_CACHE_KEY + '_' + i];
+      if (p === undefined || p === null) return null; // チャンク欠損時はキャッシュ不成立として通常処理へ
+      out += p;
+    }
+    return out;
+  } catch (err) {
+    return null;
+  }
+}
+
 // 書き込み発生時にキャッシュを即座に破棄する（古いデータが返るのを防ぐ）
+// metaキーを消せばチャンクへの参照が失われ、キャッシュ全体が無効になる
 function invalidateRecordsCache() {
   try {
-    CacheService.getScriptCache().remove(RECORDS_CACHE_KEY);
+    CacheService.getScriptCache().remove(RECORDS_CACHE_KEY + '_meta');
   } catch (err) {
     // 破棄失敗時も最大15秒で自然消滅するため致命的ではない
   }

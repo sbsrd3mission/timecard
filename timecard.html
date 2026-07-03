@@ -300,10 +300,28 @@
                 } catch(e) { /* 次回再試行 */ }
             };
 
+            // 同期の多重実行防止フラグ。前回の同期が完了する前に3秒ポーリング等で
+            // 次の同期が始まると、サーバー側の同時実行数が積み上がり404の原因になる。
+            const syncInFlightRef = useRef(false);
+
             // ===== GASから全データを取得（clientUpdatedAt ベースの双方向同期）=====
             const syncFromGAS = async (url, silent) => {
                 const targetUrl = url || gasUrl;
                 if (!targetUrl) return { success: false, message: 'GAS URLが未設定です' };
+
+                // 前回の同期がまだ実行中ならスキップ（多重実行防止）
+                if (syncInFlightRef.current) {
+                    return { success: true, count: 0, merged: [], message: '同期実行中のためスキップ' };
+                }
+                syncInFlightRef.current = true;
+                try {
+                    return await syncFromGASInner(targetUrl, silent);
+                } finally {
+                    syncInFlightRef.current = false;
+                }
+            };
+
+            const syncFromGASInner = async (targetUrl, silent) => {
 
                 // ローカル更新直後15秒間は同期をスキップ（初期Race Condition対策）
                 const lastUpdate = parseInt(localStorage.getItem('timecard_local_update_time') || '0');
@@ -321,7 +339,7 @@
                             if (targetUrl !== fallbackUrl) {
                                 setGasUrl(fallbackUrl);
                                 localStorage.setItem('timecard_gas_url', fallbackUrl);
-                                return syncFromGAS(fallbackUrl, silent);
+                                return syncFromGASInner(fallbackUrl, silent); // 内部関数を直接呼ぶ（多重実行ガードを迂回）
                             }
                         }
                         throw new Error('HTTP ' + response.status);

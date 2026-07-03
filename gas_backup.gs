@@ -7,18 +7,42 @@
 // 全シート読み込み（5〜6秒）の結果を短時間だけサーバー側に記憶して応答を高速化する。
 // 打刻・削除などの書き込みがあった瞬間に破棄するため、古いデータが返り続けることはない。
 const RECORDS_CACHE_KEY = 'getAll_cache_v1';
-const RECORDS_CACHE_SECONDS = 15;
+// 60秒キャッシュ。書き込み時は即破棄するため打刻の反映は遅れない。
+// （スプレッドシートを直接手編集した場合のみ最大60秒反映が遅れる）
+const RECORDS_CACHE_SECONDS = 60;
 
 function doGet(e) {
   const action = e.parameter.action;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
   if (action === 'getAll') {
-    const cached = getRecordsCache();
+    let cached = getRecordsCache();
     if (cached) {
       return ContentService.createTextOutput(cached)
         .setMimeType(ContentService.MimeType.JSON);
     }
+    // ===== キャッシュ再構築の同時多発（スタンピード）防止 =====
+    // キャッシュ切れの瞬間に複数端末から重い全件読み込みが同時実行されると
+    // GASの同時実行上限に達して404が返るため、再構築は1つに直列化する。
+    // ※ doPost（打刻）はgetScriptLockを使用しており、こちらはgetDocumentLockなので
+    //    打刻処理をブロックすることはない。
+    const lock = LockService.getDocumentLock();
+    let locked = false;
+    try { locked = lock.tryLock(25000); } catch (err) { locked = false; }
+    if (locked) {
+      try {
+        // ロック待ちの間に他の実行がキャッシュを作った可能性を再確認
+        cached = getRecordsCache();
+        if (cached) {
+          return ContentService.createTextOutput(cached)
+            .setMimeType(ContentService.MimeType.JSON);
+        }
+        return getAllRecords();
+      } finally {
+        lock.releaseLock();
+      }
+    }
+    // ロックが取れなかった場合も従来通り自力で構築（フォールバック）
     return getAllRecords();
   } else if (action === 'getSettings') {
     const settings = getSettings(ss);

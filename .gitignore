@@ -15,3 +15,6 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# スタッフの個人情報・管理者PINを含むバックアップ（社内ルール: 個人情報・認証情報はコミットしない）
+settings_backup_latest.json

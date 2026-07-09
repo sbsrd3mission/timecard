@@ -131,6 +131,9 @@
 
             // 同期ステータス
             const [syncStatus, setSyncStatus] = useState({ state: 'idle', message: '', lastSync: localStorage.getItem('timecard_last_sync') || '' });
+            // 月次確認（スタッフ名|YYYY-MM → 確認日時）
+            const [confirmations, setConfirmations] = useState(() => safeParseJSON(localStorage.getItem('timecard_confirmations'), {}));
+            useEffect(() => { localStorage.setItem('timecard_confirmations', JSON.stringify(confirmations)); }, [confirmations]);
 
             useEffect(() => { localStorage.setItem('timecard_staff_v2', JSON.stringify(staffList)); }, [staffList]);
             useEffect(() => { localStorage.setItem('timecard_records', JSON.stringify(timeRecords)); }, [timeRecords]);
@@ -221,6 +224,9 @@
                         if (data.settings.adminPin && /^\d{4}$/.test(String(data.settings.adminPin))) {
                             setAdminPin(String(data.settings.adminPin));
                         }
+                        if (data.settings.confirmations && typeof data.settings.confirmations === 'object') {
+                            setConfirmations(data.settings.confirmations);
+                        }
                         console.log('Settings synced from GAS');
                     }
                 } catch(e) { console.error('Sync settings failed', e); }
@@ -229,6 +235,19 @@
             // === clientUpdatedAt ベースの同期保護 ===
             // 全てのレコード変更時に clientUpdatedAt (ISO 8601) を付与。
             // 同期時はこのタイムスタンプで新旧を判定し、最新データを勝たせる。
+
+            // 月次確認「今月分を確認しました」をGASへ記録（押すたびに日時上書き）
+            const confirmMonth = async (staffName, yearMonth) => {
+                const now = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(0, 16);
+                setConfirmations(prev => ({ ...prev, [`${staffName}|${yearMonth}`]: now }));
+                if (!gasUrl) return;
+                try {
+                    await fetch(gasUrl, {
+                        method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' },
+                        body: JSON.stringify({ action: 'confirmMonth', staffName, yearMonth })
+                    });
+                } catch (e) { console.error('confirmMonth failed', e); }
+            };
 
             // GASへの送信関数
             const sendToGAS = async (record) => {
@@ -476,7 +495,13 @@
                 }
             }, [gasUrl]);
 
-            return { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, saveSettingsToGAS, syncSettingsFromGAS, syncStatus };
+            return { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, saveSettingsToGAS, syncSettingsFromGAS, syncStatus, confirmations, confirmMonth };
+        };
+
+        // Excel出力時に修正タグを除去して備考をきれいにする（アプリ内の履歴には残る）
+        const cleanRemarksForExcel = (text) => {
+            if (!text) return '';
+            return String(text).replace(/【本人修正済】/g, '').replace(/\s*\/\s*(?=\/|$)/g, '').replace(/\s{2,}/g, ' ').trim();
         };
 
         const calculateDuration = (start, end) => {
@@ -519,6 +544,7 @@
             const [breakEnd, setBreakEnd] = useState(initialRecord?.breakEnd ? formatTimeHM(initialRecord.breakEnd) : '');
             const [additionalBreak, setAdditionalBreak] = useState(initialRecord?.additionalBreakMins || 0);
             const [meal, setMeal] = useState(initialRecord?.meal || false);
+            const [editTransport, setEditTransport] = useState(initialRecord?.transport != null ? String(initialRecord.transport) : '');
             const [remarks, setRemarks] = useState(initialRecord?.remarks || '');
             const [isPaidLeave, setIsPaidLeave] = useState(initialRecord?.isPaidLeave || isPaidLeaveMode);
 
@@ -551,6 +577,7 @@
                     breakEnd: isPaidLeave ? null : safeTimeStr(breakEnd),
                     additionalBreakMins: isPaidLeave ? 0 : parseInt(additionalBreak) || 0,
                     meal: isPaidLeave ? false : meal,
+                    transport: isPaidLeave ? null : (editTransport === '' ? null : (parseInt(editTransport) || 0)),
                     isPaidLeave: isPaidLeave,
                     remarks: systemAppendedRemarks,
                     clientUpdatedAt: new Date().toISOString()
@@ -619,6 +646,13 @@
                                                 <p className="text-[10px] text-primary/50 mt-1">※中抜け時間は含まず、その他に取った休憩分数</p>
                                             )}
                                         </div>
+                                        <div className="flex-1">
+                                            <label className="block text-xs font-bold text-primary mb-1">🚃 交通費（往復・円）</label>
+                                            <input type="number" inputMode="numeric" min="0" value={editTransport}
+                                                onChange={(e) => setEditTransport(e.target.value.replace(/[^0-9]/g, ''))}
+                                                placeholder="なしは空欄"
+                                                className="w-full border-2 border-primary/20 p-2 rounded-xl text-right focus:border-secondary" />
+                                        </div>
                                         <label className="flex-1 flex items-center justify-center space-x-2 cursor-pointer border-2 border-primary/20 rounded-xl p-2 hover:bg-surface transition-colors">
                                             <input type="checkbox" checked={meal} onChange={(e) => setMeal(e.target.checked)} className="w-5 h-5 accent-secondary" />
                                             <span className="font-bold text-primary">🥗 賄い</span>
@@ -657,7 +691,7 @@
         };
 
         // --- カレンダー・履歴マネージャー ---
-        const MonthlyTimeEditor = ({ staffName, isAdmin, timeRecords, setTimeRecords, sendToGAS, deleteFromGAS, onBack }) => {
+        const MonthlyTimeEditor = ({ staffName, isAdmin, timeRecords, setTimeRecords, sendToGAS, deleteFromGAS, onBack, confirmations, onConfirmMonth }) => {
             const [selectedMonth, setSelectedMonth] = useState(() => {
                 const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
             });
@@ -699,6 +733,7 @@
                             {record ? (
                                 record.isPaidLeave ? (
                                     <>
+                                        <td className="p-3 text-center text-primary/30">-</td>
                                         <td className="p-3 text-center text-primary/30">-</td>
                                         <td className="p-3 text-center text-primary/30">-</td>
                                         <td className="p-3 text-center text-primary/30">-</td>
@@ -758,6 +793,7 @@
                                             })()}
                                         </td>
                                         <td className="p-3 text-center">{record.meal ? '🥗' : '-'}</td>
+                                        <td className="p-3 text-center text-sm font-bold text-sky-700">{record.transport != null && record.transport !== '' ? Number(record.transport).toLocaleString() + '円' : <span className="text-primary/30 font-normal">-</span>}</td>
                                         <td className="p-2 text-xs truncate max-w-[100px] text-gray-500 relative">
                                             {record.remarks?.includes('【本人修正済】') ? (
                                                 <span className="bg-amber-100 text-amber-700 px-1 py-0.5 rounded text-[10px] font-bold inline-block mr-1" title={record.remarks}>修正済</span>
@@ -771,6 +807,7 @@
                                 )
                             ) : (
                                 <>
+                                    <td className="p-3"></td>
                                     <td className="p-3"></td>
                                     <td className="p-3"></td>
                                     <td className="p-3"></td>
@@ -837,6 +874,7 @@
                                         <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-20">中抜け</th>
                                         <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-16">休憩</th>
                                         <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-16">賄い</th>
+                                        <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-20">交通費</th>
                                         <th className="p-3 font-bold text-sm text-primary whitespace-nowrap max-w-[150px]">備考・ログ</th>
                                         <th className="p-3 font-bold text-sm text-primary text-center whitespace-nowrap w-32">操作</th>
                                     </tr>
@@ -846,6 +884,41 @@
                                 </tbody>
                             </table>
                         </div>
+
+                        {(() => {
+                            const monthRecs = timeRecords.filter(r => r.staffName === staffName && r.date && r.date.startsWith(selectedMonth) && !r.isPaidLeave);
+                            const transportTotal = monthRecs.reduce((a, r) => a + (r.transport != null ? (parseInt(r.transport) || 0) : 0), 0);
+                            const workDays = monthRecs.filter(r => r.clockIn).length;
+                            const confirmedAt = confirmations ? confirmations[`${staffName}|${selectedMonth}`] : null;
+                            return (
+                                <div className="mt-4 space-y-3">
+                                    <div className="flex flex-wrap gap-3 justify-end items-center bg-surface border-2 border-primary/10 rounded-xl p-3">
+                                        <span className="text-sm font-bold text-primary/70">出勤 {workDays}日</span>
+                                        <span className="text-lg font-bold text-sky-700">🚃 交通費 月間合計: {transportTotal.toLocaleString()}円</span>
+                                    </div>
+                                    {!isAdmin && onConfirmMonth && (
+                                        <div className="bg-amber-50 border-2 border-amber-300 rounded-xl p-3 text-center">
+                                            <p className="text-xs text-amber-800 font-bold mb-2">
+                                                月末に内容（時間・交通費・賄い）を確認して、このボタンを押してください。<br/>
+                                                ここに記載の内容がそのまま給与に反映されます。
+                                            </p>
+                                            <button onClick={() => {
+                                                if (window.confirm(`${selectedMonth.replace('-', '年')}月分の打刻・交通費の内容を確認しましたか？
+この内容がそのまま給与計算に使われます。`)) {
+                                                    onConfirmMonth(staffName, selectedMonth);
+                                                }
+                                            }} className="bg-gradient-to-r from-amber-400 to-orange-400 hover:brightness-110 text-white font-bold py-3 px-6 rounded-xl shadow border-b-4 border-orange-600 active:scale-95 transition-all">
+                                                ✅ 今月分を確認しました
+                                            </button>
+                                            {confirmedAt && <p className="text-xs text-emerald-700 font-bold mt-2">確認済み: {confirmedAt}（押し直すと更新されます）</p>}
+                                        </div>
+                                    )}
+                                    {isAdmin && confirmedAt && (
+                                        <p className="text-right text-xs text-emerald-700 font-bold">✅ 本人確認済み: {confirmedAt}</p>
+                                    )}
+                                </div>
+                            );
+                        })()}
                     </div>
 
                     {editModalData && (
@@ -872,7 +945,7 @@
             adminPin, setAdminPin,
             gasUrl, setGasUrl,
             syncFromGAS, saveSettingsToGAS, syncStatus,
-            openAdminHistoryView 
+            openAdminHistoryView, confirmations 
         }) => {
             const [targetMonth, setTargetMonth] = useState(() => {
                 const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -1022,7 +1095,7 @@
                         for (let d = 1; d <= 31; d++) {
                             const row = ws.getRow(startRow + d - 1);
                             // 全書き込み対象セルをクリア
-                            [1,2,3,4,5,6,7,11,16].forEach(c => { row.getCell(c).value = null; });
+                            [1,2,3,4,5,6,7,11,15,16].forEach(c => { row.getCell(c).value = null; });
 
                             if (d <= daysInMonth) {
                                 const targetDateObj = new Date(year, month - 1, d);
@@ -1093,7 +1166,7 @@
 
                                 for (let d = 1; d <= 31; d++) {
                                     const r = ws.getRow(sRow + d - 1);
-                                    [1,2,3,4,5,6,7,11,16].forEach(c => { r.getCell(c).value = null; });
+                                    [1,2,3,4,5,6,7,11,15,16].forEach(c => { r.getCell(c).value = null; });
                                     if (d <= daysInMonth) {
                                         const tDateObj = new Date(year, month - 1, d);
                                         const dVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
@@ -1131,6 +1204,9 @@
                         }
                         if (startRow === -1) startRow = 2;
 
+                        // O列ヘッダー「交通費」（テンプレートの空き列を使用）
+                        try { const hr0 = ws.getRow(startRow - 1); if (!hr0.getCell(15).value) hr0.getCell(15).value = '交通費'; } catch (e) {}
+
                         for (let d = 1; d <= daysInMonth; d++) {
                             const row = ws.getRow(startRow + d - 1);
                             const targetDateStrShort = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
@@ -1138,7 +1214,7 @@
 
                             if (record) {
                                 if (record.isPaidLeave) {
-                                    row.getCell(16).value = '【有給申請】 ' + (record.remarks || '');
+                                    row.getCell(16).value = ('【有給申請】 ' + cleanRemarksForExcel(record.remarks)).trim();
                                 } else {
                                     row.getCell(3).value = timeToExcelFraction(record.clockIn);
                                     row.getCell(6).value = timeToExcelFraction(record.clockOut);
@@ -1149,7 +1225,8 @@
                                     row.getCell(4).value = timeToExcelFraction(record.breakStart);
                                     row.getCell(5).value = timeToExcelFraction(record.breakEnd);
 
-                                    row.getCell(16).value = remarks || null;
+                                    row.getCell(15).value = (record.transport !== undefined && record.transport !== null) ? Number(record.transport) : null;
+                                    row.getCell(16).value = cleanRemarksForExcel(remarks) || null;
 
                                     // K列(col11)に合計休憩時間を書き込む
                                     if (record.clockIn && record.clockOut) {
@@ -1182,6 +1259,21 @@
                                 }
                             }
                         }
+
+                        // ===== 交通費 月間合計（SUM関数: 出力後にO列を直せば合計も再計算される）＋本人確認日時 =====
+                        try {
+                            const sumRow = ws.getRow(startRow + 31);
+                            sumRow.getCell(14).value = '交通費合計';
+                            sumRow.getCell(14).font = { bold: true };
+                            sumRow.getCell(15).value = { formula: `SUM(O${startRow}:O${startRow + 30})` };
+                            sumRow.getCell(15).numFmt = '#,##0"円"';
+                            sumRow.getCell(15).font = { bold: true };
+                            const confKey = `${staff.name}|${year}-${String(month).padStart(2, '0')}`;
+                            const confAt = (confirmations && confirmations[confKey]) || null;
+                            const confRow = ws.getRow(startRow + 32);
+                            confRow.getCell(14).value = confAt ? `本人確認済み: ${confAt}` : '本人確認: 未';
+                            confRow.getCell(14).font = { bold: true, color: { argb: confAt ? 'FF1B7A4B' : 'FFC0392B' } };
+                        } catch (e) { console.warn('交通費合計の書き込みに失敗', e); }
                     });
 
                     // ステップ3: 対象月に出勤記録がないスタッフのシートを削除
@@ -1309,7 +1401,7 @@
                         if (startRow === -1) return;
                         for (let d = 1; d <= 31; d++) {
                             const row = ws.getRow(startRow + d - 1);
-                            [1,2,3,4,5,6,7,11,16].forEach(c => { row.getCell(c).value = null; });
+                            [1,2,3,4,5,6,7,11,15,16].forEach(c => { row.getCell(c).value = null; });
                             if (d <= daysInMonth) {
                                 const targetDateObj = new Date(year, month - 1, d);
                                 const dateVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
@@ -1366,7 +1458,7 @@
 
                                 for (let d = 1; d <= 31; d++) {
                                     const r = ws.getRow(sRow + d - 1);
-                                    [1,2,3,4,5,6,7,11,16].forEach(c => { r.getCell(c).value = null; });
+                                    [1,2,3,4,5,6,7,11,15,16].forEach(c => { r.getCell(c).value = null; });
                                     if (d <= daysInMonth) {
                                         const tDateObj = new Date(year, month - 1, d);
                                         const dVal = new Date(Date.UTC(year, month - 1, d, 12, 0, 0));
@@ -1395,7 +1487,7 @@
                             if (!record) continue;
 
                             if (record.isPaidLeave) {
-                                row.getCell(16).value = '【有給申請】 ' + (record.remarks || '');
+                                row.getCell(16).value = ('【有給申請】 ' + cleanRemarksForExcel(record.remarks)).trim();
                             } else {
                                 row.getCell(3).value = timeToExcelFraction(record.clockIn);
                                 row.getCell(6).value = timeToExcelFraction(record.clockOut);
@@ -1406,7 +1498,8 @@
                                 row.getCell(4).value = timeToExcelFraction(record.breakStart);
                                 row.getCell(5).value = timeToExcelFraction(record.breakEnd);
 
-                                row.getCell(16).value = remarks || null;
+                                row.getCell(15).value = (record.transport !== undefined && record.transport !== null) ? Number(record.transport) : null;
+                                row.getCell(16).value = cleanRemarksForExcel(remarks) || null;
 
                                 // K列(col11)に合計休憩時間を書き込む
                                 if (record.clockIn && record.clockOut) {
@@ -1476,12 +1569,13 @@
 
                         ws.getRow(blockStart).getCell(3).value = '【給与計算】';
                         ws.getRow(blockStart).getCell(3).font = { bold: true, size: 11 };
-                        setPayRow(1, '勤務時間合計', totalH + ' 時間', null, `(${totalDays}日出勤)`, false);
+                        // すべてセル参照の数式にする: タイムカード側の数字を直せば報酬・請求まで自動で再計算される
+                        setPayRow(1, '勤務時間合計', { formula: `ROUND(SUM(L${startRow}:L${startRow + 30})*24,2)` }, '0.00"時間"', `(${totalDays}日出勤)`, false);
                         setPayRow(2, '時給', hourlyRate, moneyFmt, null, false);
-                        setPayRow(3, '1日交通費', dailyTransport, moneyFmt, null, false);
-                        setPayRow(4, '報酬', remuneration, moneyFmt, `${totalH}時間 × ${hourlyRate.toLocaleString()}円`, false);
-                        setPayRow(5, '交通費合計', transportTotal, moneyFmt, `${dailyTransport.toLocaleString()}円 × ${totalDays}日`, false);
-                        setPayRow(6, '請求合計', totalBill, moneyFmt, null, true);
+                        setPayRow(3, '1日交通費（参考）', dailyTransport, moneyFmt, '実際はO列の日別入力が優先', false);
+                        setPayRow(4, '報酬', { formula: `ROUND(D${blockStart + 1}*D${blockStart + 2},0)` }, moneyFmt, '勤務時間合計 × 時給', false);
+                        setPayRow(5, '交通費合計', { formula: `SUM(O${startRow}:O${startRow + 30})` }, moneyFmt, 'O列（日別交通費）の合計', false);
+                        setPayRow(6, '請求合計', { formula: `D${blockStart + 4}+D${blockStart + 5}` }, moneyFmt, '報酬 ＋ 交通費合計', true);
 
                         outsourcedPayData[staff.name] = true;
                     });
@@ -1663,7 +1757,7 @@
             };
             const dismissError = (id) => setAppErrors(prev => prev.filter(e => e.id !== id));
 
-            const { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, saveSettingsToGAS, syncSettingsFromGAS, syncStatus } = useAppData(addAppError);
+            const { staffList, setStaffList, timeRecords, setTimeRecords, adminPin, setAdminPin, gasUrl, setGasUrl, sendToGAS, deleteFromGAS, syncFromGAS, saveSettingsToGAS, syncSettingsFromGAS, syncStatus, confirmations, confirmMonth } = useAppData(addAppError);
             const [view, setView] = useState('punch'); 
             
             const [selectedStaffName, setSelectedStaffName] = useState('');
@@ -1671,6 +1765,9 @@
             const [hasMeal, setHasMeal] = useState(false);
             const [isMealDirty, setIsMealDirty] = useState(false);
             const [isRemarksDirty, setIsRemarksDirty] = useState(false);
+            // 交通費（本人手入力。自動セットは行わない＝入力責任は本人）
+            const [transport, setTransport] = useState('');
+            const [isTransportDirty, setIsTransportDirty] = useState(false);
 
             const [historyStaffName, setHistoryStaffName] = useState('');
             const [historyIsAdminMode, setHistoryIsAdminMode] = useState(false);
@@ -1797,7 +1894,7 @@
                     const existing = prev.find(r => r.id === recordId) || {
                         id: recordId, staffName: selectedStaffName, date: dateStr,
                         clockIn: null, breakStart: null, breakEnd: null, clockOut: null,
-                        meal: false, isPaidLeave: false, remarks: '', additionalBreakMins: 0
+                        meal: false, isPaidLeave: false, remarks: '', additionalBreakMins: 0, transport: null
                     };
 
                     const updated = { ...existing };
@@ -1808,6 +1905,8 @@
                     
                     // どの打刻時でも現在の賄いチェック状態を保存する
                     updated.meal = hasMeal;
+                    // 交通費も同様に現在の入力値を保存（空欄なら未入力=null のまま）
+                    updated.transport = transport === '' ? null : (parseInt(transport) || 0);
 
                     if (type === 'out' || type === 'update_info') {
                         if (remarks) updated.remarks = updated.remarks ? updated.remarks + ' / ' + remarks : remarks;
@@ -1829,7 +1928,7 @@
 
                 const actionNames = { in: '出勤', out: '退勤', break_in: '中抜け開始', break_out: '中抜け終了', update_info: '情報更新' };
                 alert(`${selectedStaffName}さん、${timeStr} に「${actionNames[type]}」として記録しました！`);
-                setSelectedStaffName(''); setRemarks(''); setHasMeal(false);
+                setSelectedStaffName(''); setRemarks(''); setHasMeal(false); setTransport(''); setIsTransportDirty(false);
             };
 
             useEffect(() => {
@@ -1847,8 +1946,13 @@
                         if (record && record.remarks !== undefined) setRemarks(record.remarks);
                         else setRemarks('');
                     }
+                    // 交通費: 当日すでに入力済みの値があれば表示（自動セットはしない）
+                    if (!isTransportDirty) {
+                        if (record && record.transport !== undefined && record.transport !== null) setTransport(String(record.transport));
+                        else setTransport('');
+                    }
                 }
-            }, [selectedStaffName, timeRecords, staffList, isMealDirty, isRemarksDirty]);
+            }, [selectedStaffName, timeRecords, staffList, isMealDirty, isRemarksDirty, isTransportDirty]);
 
             const changeView = (newView) => { setView(newView); document.body.scrollTop = 0; };
 
@@ -2030,13 +2134,44 @@
                                         </div>
                                     </div>
 
-                                    {/* ② 賄いトグル（大ボタン化・スクロールなしで見える位置に） */}
-                                    <button onClick={() => { setHasMeal(!hasMeal); setIsMealDirty(true); }}
-                                        className={`w-full mb-6 font-bold py-4 px-4 rounded-2xl text-xl transition-all active:scale-95 border-b-4 shadow-md ${hasMeal
-                                            ? 'bg-gradient-to-br from-emerald-500 to-emerald-600 text-white border-emerald-800'
-                                            : 'bg-white text-primary/70 border-primary/20 border-2 border-b-4 border-dashed hover:bg-emerald-50'}`}>
-                                        {hasMeal ? '🥗 賄いあり ✓' : '🥗 賄いあり（食べたらタップ）'}
-                                    </button>
+                                    {/* ② 賄いトグル＋交通費（横並び・スクロールなしで見える位置に） */}
+                                    <div className="grid grid-cols-2 gap-3 mb-6 text-left">
+                                        <button onClick={() => { setHasMeal(!hasMeal); setIsMealDirty(true); }}
+                                            className={`font-bold py-3 px-2 rounded-2xl text-lg transition-all active:scale-95 border-b-4 shadow-md ${hasMeal
+                                                ? 'bg-gradient-to-br from-emerald-500 to-emerald-600 text-white border-emerald-800'
+                                                : 'bg-white text-primary/70 border-primary/20 border-2 border-b-4 border-dashed hover:bg-emerald-50'}`}>
+                                            {hasMeal ? '🥗 賄いあり ✓' : <span>🥗 賄いあり<br/><span className="text-xs font-normal">（食べたらタップ）</span></span>}
+                                        </button>
+                                        <div className="bg-white rounded-2xl border-2 border-primary/20 p-2 shadow-md">
+                                            <label className="block text-xs font-bold text-primary/70 mb-1">🚃 交通費（往復・円）</label>
+                                            <input type="number" inputMode="numeric" min="0" value={transport}
+                                                onChange={(e) => { setTransport(e.target.value.replace(/[^0-9]/g, '')); setIsTransportDirty(true); }}
+                                                placeholder="なしは空欄"
+                                                className="w-full border-2 border-primary/20 rounded-lg p-2 text-right text-lg font-bold focus:border-secondary" />
+                                            {(() => {
+                                                const me = staffList.find(s => s.name === selectedStaffName);
+                                                const usual = me && me.dailyTransport > 0 ? me.dailyTransport : 0;
+                                                return (
+                                                    <div className="mt-1 flex flex-col gap-1">
+                                                        {usual > 0 && (
+                                                            <button onClick={() => { setTransport(String(usual)); setIsTransportDirty(true); }}
+                                                                className="w-full text-sm font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 rounded-lg py-1.5 border border-sky-300 active:scale-95 transition-all">
+                                                                いつもの {usual.toLocaleString()}円
+                                                            </button>
+                                                        )}
+                                                        {transport !== '' && parseInt(transport) > 0 && parseInt(transport) !== usual && (
+                                                            <button onClick={() => {
+                                                                if (!window.confirm(`${parseInt(transport).toLocaleString()}円 を「いつもの額」として覚えますか？`)) return;
+                                                                const newList = staffList.map(s => s.name === selectedStaffName ? { ...s, dailyTransport: parseInt(transport) } : s);
+                                                                setStaffList(newList);
+                                                                saveSettingsToGAS(newList, adminPin);
+                                                            }} className="w-full text-[11px] text-primary/50 underline">この額をいつもの額として覚える</button>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })()}
+                                        </div>
+                                    </div>
 
                                     {/* ③ 履歴・有給申請バー */}
                                     <button onClick={() => { setHistoryStaffName(selectedStaffName); setHistoryIsAdminMode(false); changeView('history'); }} className="w-full mb-6 bg-gradient-to-r from-teal-500 to-sky-500 hover:from-teal-400 hover:to-sky-400 text-white font-bold py-4 px-4 rounded-xl shadow-md transition-all active:scale-95 text-lg flex justify-center items-center gap-2 border-b-4 border-teal-700">
@@ -2072,6 +2207,7 @@
                                 syncFromGAS={syncFromGAS} 
                                 saveSettingsToGAS={saveSettingsToGAS}
                                 syncStatus={syncStatus}
+                                confirmations={confirmations}
                                 openAdminHistoryView={(name) => { setHistoryStaffName(name); setHistoryIsAdminMode(true); changeView('history'); }}
                             />
                         )}
@@ -2084,6 +2220,8 @@
                                 setTimeRecords={setTimeRecords}
                                 sendToGAS={sendToGAS}
                                 deleteFromGAS={deleteFromGAS}
+                                confirmations={confirmations}
+                                onConfirmMonth={confirmMonth}
                                 onBack={() => changeView(historyIsAdminMode ? 'admin' : 'punch')}
                             />
                         )}

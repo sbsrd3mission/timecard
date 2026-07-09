@@ -91,6 +91,10 @@ function doPost(e) {
     } else if (action === 'saveSettings') {
       const result = saveSettings(ss, postData.settings);
       return createJsonResponse(result);
+    } else if (action === 'confirmMonth') {
+      // スタッフ本人による「今月分を確認しました」の記録（押すたびに日時を上書き）
+      const result = confirmMonth(ss, postData.staffName, postData.yearMonth);
+      return createJsonResponse(result);
     }
   } finally {
     lock.releaseLock();
@@ -126,7 +130,7 @@ function getAllRecords() {
     // ただし、最大列数(getMaxColumns)を超えて読み込もうとすると境界外エラーになるため、安全な範囲を指定する
     const lastCol = sheet.getLastColumn();
     const maxCol = sheet.getMaxColumns();
-    const colsToRead = Math.min(Math.max(lastCol, 1), maxCol, 13);
+    const colsToRead = Math.min(Math.max(lastCol, 1), maxCol, 14);
     if (colsToRead < 1) return;
 
     let data;
@@ -203,6 +207,13 @@ function getAllRecords() {
         isDeleted = true;
       }
 
+      // 列14（交通費）: 空セルはnull
+      let transport = null;
+      if (row.length > 13 && row[13] !== '' && row[13] !== null && row[13] !== undefined) {
+        const t = parseInt(row[13]);
+        transport = isNaN(t) ? null : t;
+      }
+
       const record = {
         id: id,
         staffName: staffName,
@@ -215,6 +226,7 @@ function getAllRecords() {
         isPaidLeave: isActuallyPaidLeave,
         remarks: remarks,
         additionalBreakMins: additionalBreakMins,
+        transport: transport,
         clientUpdatedAt: clientUpdatedAt || null,
         serverUpdatedAtMs: serverUpdatedAtMs,
         deleted: isDeleted
@@ -375,23 +387,23 @@ function writeRecord(ss, record) {
   let sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
     sheet = ss.insertSheet(sheetName);
-    sheet.getRange(1, 1, 1, 13).setValues([[
+    sheet.getRange(1, 1, 1, 14).setValues([[
       '日付', '曜日', '出勤', '中抜け開始', '中抜け終了', '退勤',
-      '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt', '削除フラグ', '休憩分数'
+      '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt', '削除フラグ', '休憩分数', '交通費'
     ]]);
-    sheet.getRange(1, 1, 1, 13).setFontWeight('bold').setBackground('#e8f5e9');
+    sheet.getRange(1, 1, 1, 14).setFontWeight('bold').setBackground('#e8f5e9');
     sheet.setFrozenRows(1);
     sheet.setTabColor('#4caf50');
   } else {
     // 既存のシートがあり、最大列数が13列未満の場合は自動的に13列以上に拡張する
     const currentMaxCols = sheet.getMaxColumns();
-    if (currentMaxCols < 13) {
-      sheet.insertColumnsAfter(currentMaxCols, 13 - currentMaxCols);
+    if (currentMaxCols < 14) {
+      sheet.insertColumnsAfter(currentMaxCols, 14 - currentMaxCols);
       // 足りないヘッダーを自動補完
-      const headerRange = sheet.getRange(1, currentMaxCols + 1, 1, 13 - currentMaxCols);
+      const headerRange = sheet.getRange(1, currentMaxCols + 1, 1, 14 - currentMaxCols);
       const allHeaders = [
         '日付', '曜日', '出勤', '中抜け開始', '中抜け終了', '退勤',
-        '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt', '削除フラグ', '休憩分数'
+        '賄い', '有給', '備考', '更新日時', 'clientUpdatedAt', '削除フラグ', '休憩分数', '交通費'
       ];
       const missingHeaders = allHeaders.slice(currentMaxCols);
       headerRange.setValues([missingHeaders]);
@@ -414,7 +426,7 @@ function writeRecord(ss, record) {
   if (lastRow >= 2) {
     const lastCol = sheet.getLastColumn();
     const maxCol = sheet.getMaxColumns();
-    const colsToRead = Math.min(Math.max(lastCol, 1), maxCol, 13);
+    const colsToRead = Math.min(Math.max(lastCol, 1), maxCol, 14);
     let allData = [];
     if (colsToRead >= 1) {
       try {
@@ -470,7 +482,7 @@ function writeRecord(ss, record) {
   const dow = dowNames[dateObj.getDay()];
 
   // フロントエンドは常にレコードの全フィールドを送信するため、
-  // 受け取ったデータをそのまま書き込む（13列に拡張: 休憩分数）
+  // 受け取ったデータをそのまま書き込む（14列: 休憩分数・交通費）
   const rowData = [
     dateStr,
     dow,
@@ -484,10 +496,20 @@ function writeRecord(ss, record) {
     new Date(),
     incomingClientUpdatedAt,
     record.deleted ? 'true' : '',
-    (record.additionalBreakMins !== undefined && record.additionalBreakMins !== null) ? record.additionalBreakMins : 0
+    (record.additionalBreakMins !== undefined && record.additionalBreakMins !== null) ? record.additionalBreakMins : 0,
+    (record.transport !== undefined && record.transport !== null && record.transport !== '') ? Number(record.transport) : ''
   ];
 
-  sheet.getRange(targetRow, 1, 1, 13).setValues([rowData]);
+  // ===== 修正履歴（EditLog）: 既存行の内容が変わった場合のみ自動で1行追記 =====
+  try {
+    if (targetRow <= lastRow && lastRow >= 2) {
+      logEditIfChanged(ss, sheetName, sheet, targetRow, rowData);
+    }
+  } catch (e) {
+    console.warn('EditLog failed:', e);
+  }
+
+  sheet.getRange(targetRow, 1, 1, 14).setValues([rowData]);
 }
 
 // ===== 設定情報の操作 =====
@@ -513,6 +535,18 @@ function getSettings(ss) {
       settings.adminPin = pin.length < 4 && /^\d+$/.test(pin) ? pin.padStart(4, '0') : pin;
     }
   });
+  // 月次確認（スタッフが「今月分を確認しました」を押した日時）を同梱
+  try {
+    const conf = ss.getSheetByName('Confirmations');
+    if (conf && conf.getLastRow() >= 2) {
+      const rows = conf.getRange(2, 1, conf.getLastRow() - 1, 3).getValues();
+      const map = {};
+      rows.forEach(function(r) {
+        if (r[0] && r[1]) map[String(r[0]) + '|' + String(r[1])] = String(r[2] || '');
+      });
+      settings.confirmations = map;
+    }
+  } catch (e) { /* 確認シートが無い場合は無視 */ }
   return settings;
 }
 
@@ -639,4 +673,74 @@ function recordDailySettingsBackup() {
   if (!settings || !settings.staffList) return;
   
   appendSettingsHistory(ss, settings, '[毎日自動バックアップ]');
+}
+
+
+// ===== 月次確認の記録（押すたびに日時を上書き） =====
+function confirmMonth(ss, staffName, yearMonth) {
+  if (!staffName || !/^\d{4}-\d{2}$/.test(String(yearMonth || ''))) {
+    return { status: 'error', message: 'スタッフ名と対象月を指定してください' };
+  }
+  let sheet = ss.getSheetByName('Confirmations');
+  if (!sheet) {
+    sheet = ss.insertSheet('Confirmations');
+    sheet.setTabColor('#3f51b5');
+    sheet.appendRow(['スタッフ名', '対象月', '確認日時']);
+    sheet.getRange(1, 1, 1, 3).setFontWeight('bold').setBackground('#e8eaf6');
+  }
+  const now = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 2) {
+    const rows = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]) === staffName && String(rows[i][1]) === yearMonth) {
+        sheet.getRange(i + 2, 3).setValue(now); // 上書き（最後に押した日時が有効）
+        return { status: 'ok', confirmedAt: now };
+      }
+    }
+  }
+  sheet.appendRow([staffName, yearMonth, now]);
+  return { status: 'ok', confirmedAt: now };
+}
+
+// ===== 修正履歴（EditLog）: 既存行の値が変わったときだけ自動追記 =====
+function logEditIfChanged(ss, sheetName, sheet, targetRow, newRowData) {
+  const old = sheet.getRange(targetRow, 1, 1, 14).getValues()[0];
+  const tz = Session.getScriptTimeZone();
+  const fmt = function(v) {
+    if (v === null || v === undefined || v === '') return '';
+    if (v instanceof Date) return Utilities.formatDate(v, tz, 'HH:mm');
+    return String(v);
+  };
+  // 比較対象: 出勤(3) 中抜け開始(4) 中抜け終了(5) 退勤(6) 賄い(7) 有給(8) 備考(9) 休憩分数(13) 交通費(14)
+  const cols = [
+    [2, '出勤'], [3, '中抜け開始'], [4, '中抜け終了'], [5, '退勤'],
+    [6, '賄い'], [7, '有給'], [8, '備考'], [12, '休憩分数'], [13, '交通費']
+  ];
+  const changes = [];
+  cols.forEach(function(c) {
+    const o = fmt(old[c[0]]);
+    const n = fmt(newRowData[c[0]]);
+    if (o !== n) changes.push(c[1] + ': 「' + (o || 'なし') + '」→「' + (n || 'なし') + '」');
+  });
+  if (changes.length === 0) return;
+
+  let log = ss.getSheetByName('EditLog');
+  if (!log) {
+    log = ss.insertSheet('EditLog');
+    log.setTabColor('#9e9e9e');
+    log.appendRow(['修正日時', 'スタッフ', '対象日', '変更内容']);
+    log.getRange(1, 1, 1, 4).setFontWeight('bold').setBackground('#eeeeee');
+  }
+  log.appendRow([
+    Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss'),
+    sheetName.replace(/_\d{6}$/, ''),
+    fmtDateCell(old[0], tz),
+    changes.join(' / ')
+  ]);
+}
+
+function fmtDateCell(v, tz) {
+  if (v instanceof Date) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+  return String(v || '');
 }

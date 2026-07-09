@@ -1260,19 +1260,19 @@
                             }
                         }
 
-                        // ===== 交通費 月間合計（SUM関数: 出力後にO列を直せば合計も再計算される）＋本人確認日時 =====
+                        // ===== 交通費 月間合計（SUM関数）＋本人確認日時 =====
+                        // テンプレート既存の合計行（回数/日数/勤務時間/深夜時間 等）を壊さないよう、
+                        // 空いているO列の中だけに書き込む。書式(太字・色)も既存に合わせて変更しない。
                         try {
-                            const sumRow = ws.getRow(startRow + 31);
-                            sumRow.getCell(14).value = '交通費合計';
-                            sumRow.getCell(14).font = { bold: true };
+                            const labelRow = ws.getRow(startRow + 31);   // 合計見出し行（33行目）: O列に見出しのみ
+                            labelRow.getCell(15).value = '交通費合計';
+                            const sumRow = ws.getRow(startRow + 32);     // 合計値行（34行目）: O列にSUM式
                             sumRow.getCell(15).value = { formula: `SUM(O${startRow}:O${startRow + 30})` };
                             sumRow.getCell(15).numFmt = '#,##0"円"';
-                            sumRow.getCell(15).font = { bold: true };
                             const confKey = `${staff.name}|${year}-${String(month).padStart(2, '0')}`;
                             const confAt = (confirmations && confirmations[confKey]) || null;
-                            const confRow = ws.getRow(startRow + 32);
-                            confRow.getCell(14).value = confAt ? `本人確認済み: ${confAt}` : '本人確認: 未';
-                            confRow.getCell(14).font = { bold: true, color: { argb: confAt ? 'FF1B7A4B' : 'FFC0392B' } };
+                            const confRow = ws.getRow(startRow + 34);    // 1行空けた36行目相当のO列
+                            confRow.getCell(15).value = confAt ? `本人確認済み: ${confAt}` : '本人確認: 未';
                         } catch (e) { console.warn('交通費合計の書き込みに失敗', e); }
                     });
 

@@ -2022,25 +2022,38 @@
                                 </div>
 
                                 <div className={`transition-all duration-500 overflow-hidden ${selectedStaffName ? 'max-h-[1000px] opacity-100' : 'max-h-0 opacity-0'}`}>
+                                    {/* ① 出勤・退勤（最上段・大ボタン） */}
+                                    <div className="mb-3 text-left">
+                                        <div className={`grid grid-cols-2 gap-3 ${currentRecord?.isPaidLeave ? 'opacity-30 pointer-events-none' : ''}`}>
+                                            <button onClick={() => handlePunch('in')} disabled={!canClockIn} className={`col-span-1 font-bold py-6 px-4 rounded-2xl shadow-md transition-all text-2xl border-b-4 ${canClockIn ? 'bg-gradient-to-br from-secondary to-[#65a30d] hover:brightness-110 text-white active:scale-95 border-[#4d7c0f]' : 'bg-gray-300 text-gray-500 border-gray-400 cursor-not-allowed opacity-60'}`}>出勤</button>
+                                            <button onClick={() => handlePunch('out')} disabled={!canClockOut} className={`col-span-1 font-bold py-6 px-4 rounded-2xl shadow-md transition-all text-2xl border-b-4 ${canClockOut ? 'bg-gradient-to-br from-accent to-[#b45309] hover:brightness-110 text-white active:scale-95 border-[#78350f]' : 'bg-gray-300 text-gray-500 border-gray-400 cursor-not-allowed opacity-60'}`}>退勤</button>
+                                        </div>
+                                    </div>
+
+                                    {/* ② 賄いトグル（大ボタン化・スクロールなしで見える位置に） */}
+                                    <button onClick={() => { setHasMeal(!hasMeal); setIsMealDirty(true); }}
+                                        className={`w-full mb-6 font-bold py-4 px-4 rounded-2xl text-xl transition-all active:scale-95 border-b-4 shadow-md ${hasMeal
+                                            ? 'bg-gradient-to-br from-emerald-500 to-emerald-600 text-white border-emerald-800'
+                                            : 'bg-white text-primary/70 border-primary/20 border-2 border-b-4 border-dashed hover:bg-emerald-50'}`}>
+                                        {hasMeal ? '🥗 賄いあり ✓' : '🥗 賄いあり（食べたらタップ）'}
+                                    </button>
+
+                                    {/* ③ 履歴・有給申請バー */}
                                     <button onClick={() => { setHistoryStaffName(selectedStaffName); setHistoryIsAdminMode(false); changeView('history'); }} className="w-full mb-6 bg-gradient-to-r from-teal-500 to-sky-500 hover:from-teal-400 hover:to-sky-400 text-white font-bold py-4 px-4 rounded-xl shadow-md transition-all active:scale-95 text-lg flex justify-center items-center gap-2 border-b-4 border-teal-700">
                                         <HistoryIcon />今月の打刻履歴を見る・修正する / 有給申請
                                     </button>
 
+                                    {/* ④ 中抜け（利用者が少ないため下段へ） */}
                                     <div className="mb-6 text-left">
                                         <div className={`grid grid-cols-2 gap-3 ${currentRecord?.isPaidLeave ? 'opacity-30 pointer-events-none' : ''}`}>
-                                            <button onClick={() => handlePunch('in')} disabled={!canClockIn} className={`col-span-1 font-bold py-6 px-4 rounded-2xl shadow-md transition-all text-2xl border-b-4 ${canClockIn ? 'bg-gradient-to-br from-secondary to-[#65a30d] hover:brightness-110 text-white active:scale-95 border-[#4d7c0f]' : 'bg-gray-300 text-gray-500 border-gray-400 cursor-not-allowed opacity-60'}`}>出勤</button>
-                                            <button onClick={() => handlePunch('out')} disabled={!canClockOut} className={`col-span-1 font-bold py-6 px-4 rounded-2xl shadow-md transition-all text-2xl border-b-4 ${canClockOut ? 'bg-gradient-to-br from-accent to-[#b45309] hover:brightness-110 text-white active:scale-95 border-[#78350f]' : 'bg-gray-300 text-gray-500 border-gray-400 cursor-not-allowed opacity-60'}`}>退勤</button>
-                                            <button onClick={() => handlePunch('break_in')} disabled={!canBreakIn} className={`col-span-1 font-bold py-4 px-4 rounded-xl shadow-sm border-2 transition-all mt-2 ${canBreakIn ? 'bg-white hover:bg-gray-50 text-primary border-primary/20 active:scale-95' : 'bg-gray-200 text-gray-400 border-gray-300 cursor-not-allowed opacity-60'}`}>中抜け開始</button>
-                                            <button onClick={() => handlePunch('break_out')} disabled={!canBreakOut} className={`col-span-1 font-bold py-4 px-4 rounded-xl shadow-sm border-2 transition-all mt-2 ${canBreakOut ? 'bg-white hover:bg-gray-50 text-primary border-primary/20 active:scale-95' : 'bg-gray-200 text-gray-400 border-gray-300 cursor-not-allowed opacity-60'}`}>中抜け終了</button>
+                                            <button onClick={() => handlePunch('break_in')} disabled={!canBreakIn} className={`col-span-1 font-bold py-4 px-4 rounded-xl shadow-sm border-2 transition-all ${canBreakIn ? 'bg-white hover:bg-gray-50 text-primary border-primary/20 active:scale-95' : 'bg-gray-200 text-gray-400 border-gray-300 cursor-not-allowed opacity-60'}`}>中抜け開始</button>
+                                            <button onClick={() => handlePunch('break_out')} disabled={!canBreakOut} className={`col-span-1 font-bold py-4 px-4 rounded-xl shadow-sm border-2 transition-all ${canBreakOut ? 'bg-white hover:bg-gray-50 text-primary border-primary/20 active:scale-95' : 'bg-gray-200 text-gray-400 border-gray-300 cursor-not-allowed opacity-60'}`}>中抜け終了</button>
                                         </div>
                                     </div>
 
+                                    {/* ⑤ 備考 */}
                                     <div className="text-left">
                                         <div className="bg-white/80 rounded-2xl p-4 border-2 border-primary/10 mb-2 shadow-sm">
-                                            <label className="flex items-center space-x-3 cursor-pointer mb-5 p-2 bg-surface rounded-xl border border-primary/10 hover:bg-white transition-colors">
-                                                <input type="checkbox" checked={hasMeal} onChange={(e) => { setHasMeal(e.target.checked); setIsMealDirty(true); }} className="w-7 h-7 accent-secondary cursor-pointer" />
-                                                <span className="text-primary font-bold text-lg">🥗 賄いあり</span>
-                                            </label>
                                             <label className="block text-sm font-bold text-primary mb-2">📝 備考（フリーコメント）</label>
                                             <input type="text" value={remarks} onChange={(e) => { setRemarks(e.target.value); setIsRemarksDirty(true); }} placeholder="例：交通費〇〇円 など" className="w-full border-2 border-primary/20 p-3 rounded-xl focus:border-secondary transition-colors" />
                                         </div>

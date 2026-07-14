@@ -602,6 +602,10 @@ function getSettings(ss) {
       const pin = row[1].toString();
       settings.adminPin = pin.length < 4 && /^\d+$/.test(pin) ? pin.padStart(4, '0') : pin;
     }
+    // 端末側が付与した設定変更時刻（新旧判定用）。無い場合は空。
+    if (row[0] === 'settingsUpdatedAt') {
+      settings.settingsUpdatedAt = row[1] ? String(row[1]) : '';
+    }
   });
   // 月次確認（スタッフが「今月分を確認しました」を押した日時）を同梱
   try {
@@ -692,6 +696,8 @@ function saveSettings(ss, settings) {
   const rows = [];
   if (settings.staffList) rows.push(['staffList', JSON.stringify(settings.staffList)]);
   if (settings.adminPin !== undefined && settings.adminPin !== null) rows.push(['adminPin', settings.adminPin]);
+  // 端末が付与した設定変更時刻を保存（端末側の新旧判定に使う）。無ければサーバー時刻のISO文字列。
+  rows.push(['settingsUpdatedAt', settings.settingsUpdatedAt || new Date().toISOString()]);
   rows.push(['updatedAt', new Date()]);
 
   if (rows.length > 0) {

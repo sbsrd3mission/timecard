@@ -112,6 +112,11 @@
             // クラウド(GAS)から設定を一度でも正常受信できたかのフラグ。
             // これが立つまでは設定のクラウド保存(saveSettingsToGAS)を一切許可しない（障害⑥対策の中核ガード）
             const settingsHydratedRef = useRef(localStorage.getItem('timecard_settings_hydrated') === 'true');
+            // この端末が最後にローカルで設定（名簿・PIN等）を変更した時刻(ISO)。
+            // クラウドから取得した設定がこれより古い場合は「保存がまだ反映されていない古いデータ」とみなして
+            // 反映をスキップする（削除直後にポーリングが古い名簿を拾って復活させる不具合の対策）。
+            // ※メモリ上のみ（リロードで自然にリセット）。永続化すると保存失敗時に更新が固着するため。
+            const localSettingsUpdatedAtRef = useRef('');
 
             // パスワード設定（デフォルトは 0000）
             const [adminPin, setAdminPin] = useState(() => {
@@ -175,6 +180,11 @@
                     console.warn('saveSettingsToGAS: クラウド設定が未受信の端末のため保存を拒否しました（障害⑥ガード）');
                     return;
                 }
+                // 設定変更時刻を付与し、この端末のローカル基準時刻として記録しておく。
+                // （クラウド保存はno-corsで完了を待てないため、直後のポーリングが古い名簿を
+                //   返してきても、この時刻より古ければ反映をスキップして削除等を保持する）
+                const settingsTs = new Date().toISOString();
+                localSettingsUpdatedAtRef.current = settingsTs;
                 try {
                     await fetch(gasUrl, {
                         method: 'POST',
@@ -184,7 +194,8 @@
                             action: 'saveSettings',
                             settings: {
                                 staffList: listToSave,
-                                adminPin: newPin || adminPin
+                                adminPin: newPin || adminPin,
+                                settingsUpdatedAt: settingsTs
                             }
                         })
                     });
@@ -205,25 +216,40 @@
                         localStorage.setItem('timecard_settings_hydrated', 'true');
                     }
                     if (data && data.status === 'ok' && data.settings) {
-                        // 【型バリデーション】配列であり、有効な名前を持つ要素が1件以上ある場合のみStateへ反映。
-                        // 空配列・不正型はStateを破壊しないため無視する（障害①③類似パターン対策）
-                        if (Array.isArray(data.settings.staffList)) {
-                            const withDefaults = (s) => {
-                                const base = typeof s === 'string' ? { name: s, defaultMeal: false } : s;
-                                return { isOutsourced: false, hourlyRate: 1200, dailyTransport: 0, ...base };
-                            };
-                            const validList = data.settings.staffList
-                                .filter(s => (typeof s === 'string' && s.trim()) || (s && typeof s === 'object' && typeof s.name === 'string' && s.name.trim()))
-                                .map(withDefaults);
-                            if (validList.length > 0) {
-                                setStaffList(validList);
-                            } else {
-                                console.warn('syncSettingsFromGAS: クラウドの名簿が空または不正のため反映をスキップしました');
+                        // 【新旧判定】この端末でローカル変更した時刻より、クラウドの設定が古い（または時刻が無い）場合は
+                        // 「まだ自分の保存が反映されていない古いデータ」とみなし、名簿・PINの反映をスキップする。
+                        // （削除直後のポーリングが削除前の名簿を拾って復活させる不具合の対策）
+                        const cloudTs = data.settings.settingsUpdatedAt ? String(data.settings.settingsUpdatedAt) : '';
+                        const localTs = localSettingsUpdatedAtRef.current || '';
+                        const cloudIsStale = localTs && (!cloudTs || cloudTs < localTs);
+
+                        if (cloudIsStale) {
+                            console.warn('syncSettingsFromGAS: クラウド設定が自端末の変更より古いため名簿・PINの反映をスキップ（削除復活防止）');
+                        } else {
+                            // 【型バリデーション】配列であり、有効な名前を持つ要素が1件以上ある場合のみStateへ反映。
+                            // 空配列・不正型はStateを破壊しないため無視する（障害①③類似パターン対策）
+                            if (Array.isArray(data.settings.staffList)) {
+                                const withDefaults = (s) => {
+                                    const base = typeof s === 'string' ? { name: s, defaultMeal: false } : s;
+                                    return { isOutsourced: false, hourlyRate: 1200, dailyTransport: 0, ...base };
+                                };
+                                const validList = data.settings.staffList
+                                    .filter(s => (typeof s === 'string' && s.trim()) || (s && typeof s === 'object' && typeof s.name === 'string' && s.name.trim()))
+                                    .map(withDefaults);
+                                if (validList.length > 0) {
+                                    setStaffList(validList);
+                                } else {
+                                    console.warn('syncSettingsFromGAS: クラウドの名簿が空または不正のため反映をスキップしました');
+                                }
                             }
+                            if (data.settings.adminPin && /^\d{4}$/.test(String(data.settings.adminPin))) {
+                                setAdminPin(String(data.settings.adminPin));
+                            }
+                            // 反映できた＝クラウドが最新に追いついたので、以後は通常同期に戻すためローカル基準時刻を合わせる
+                            if (cloudTs) localSettingsUpdatedAtRef.current = cloudTs;
                         }
-                        if (data.settings.adminPin && /^\d{4}$/.test(String(data.settings.adminPin))) {
-                            setAdminPin(String(data.settings.adminPin));
-                        }
+
+                        // 月次確認（confirmations）は名簿とは別系統のため、新旧判定に関わらず常に反映する
                         if (data.settings.confirmations && typeof data.settings.confirmations === 'object') {
                             setConfirmations(data.settings.confirmations);
                         }

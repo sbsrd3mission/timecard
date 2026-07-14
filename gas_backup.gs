@@ -69,6 +69,21 @@ const LEAVE_NAME_COL = 2;      // B列: 名前
 const LEAVE_NEXT_GRANT_COL = 9; // I列: 基準日（次回付与日）
 const LEAVE_REMAINING_COL = 14; // N列: 有給残日数
 
+// 見た目がそっくりな異体字（例: はしご高「髙」と標準の「高」）を吸収して名前を照合する。
+// 管理簿側の正式表記（戸籍表記）はそのままで良く、ここでは比較用にのみ正規化する。
+const KANJI_VARIANTS = [
+  ['髙', '高'], // 髙(はしご高) -> 高
+  ['﨑', '崎'], // 﨑(たつさき) -> 崎
+  ['齋', '斎'], ['斉', '斎'], // 齋・斉 -> 斎
+  ['邊', '辺'], ['邉', '辺'], // 邊・邉 -> 辺
+  ['櫻', '桜'], // 櫻 -> 桜
+];
+function normalizeNameForMatch(name) {
+  let s = String(name || '').trim();
+  for (const [from, to] of KANJI_VARIANTS) s = s.split(from).join(to);
+  return s;
+}
+
 function getLeaveInfo(year) {
   const result = {};
   try {
@@ -87,8 +102,9 @@ function getLeaveInfo(year) {
     if (lastRow < 2) return { found: true, fileName: file.getName(), leaveInfo: result };
     const values = sheet.getRange(2, 1, lastRow - 1, LEAVE_REMAINING_COL).getValues();
     for (const row of values) {
-      const name = String(row[LEAVE_NAME_COL - 1] || '').trim();
-      if (!name) continue;
+      const rawName = String(row[LEAVE_NAME_COL - 1] || '').trim();
+      if (!rawName) continue;
+      const name = normalizeNameForMatch(rawName);
       const nextGrantRaw = row[LEAVE_NEXT_GRANT_COL - 1];
       const nextGrant = nextGrantRaw instanceof Date
         ? Utilities.formatDate(nextGrantRaw, Session.getScriptTimeZone(), 'yyyy/MM/dd')

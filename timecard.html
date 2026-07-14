@@ -1013,6 +1013,17 @@
                 }
             };
 
+            // 見た目がそっくりな異体字（例: はしご高「髙」と標準の「高」）を吸収して有給管理表の名前と照合する。
+            // GAS側(gas_backup.gs)の normalizeNameForMatch と同じ変換ルールにしておくこと。
+            const KANJI_VARIANTS_JS = [
+                ['髙', '高'], ['﨑', '崎'], ['齋', '斎'], ['斉', '斎'], ['邊', '辺'], ['邉', '辺'], ['櫻', '桜'],
+            ];
+            const normalizeNameForMatch = (name) => {
+                let s = String(name || '').trim();
+                for (const [from, to] of KANJI_VARIANTS_JS) s = s.split(from).join(to);
+                return s;
+            };
+
             const handleExportWithTemplate = async () => {
                 try {
                     const [yearStr, monthStr] = targetMonth.split('-');
@@ -1320,7 +1331,7 @@
                             ).length;
                             leaveRow33.getCell(2).value = usedThisMonth;
 
-                            const info = leaveInfo && leaveInfo[staff.name];
+                            const info = leaveInfo && leaveInfo[normalizeNameForMatch(staff.name)];
                             if (info) {
                                 leaveRow33.getCell(5).value = (info.remainingDays !== undefined && info.remainingDays !== null && info.remainingDays !== '')
                                     ? `${info.remainingDays}日` : '';

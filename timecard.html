@@ -999,6 +999,17 @@
                     saveSettingsToGAS(newList, adminPin);
                 }
             };
+
+            // スタッフの表示順を1つ上/下に移動（おなまえプルダウン・スタッフ設定一覧の並び順に反映される）
+            const moveStaff = (name, dir) => {
+                const index = staffList.findIndex(s => s.name === name);
+                const target = index + dir;
+                if (index === -1 || target < 0 || target >= staffList.length) return;
+                const newList = [...staffList];
+                [newList[index], newList[target]] = [newList[target], newList[index]];
+                setStaffList(newList);
+                saveSettingsToGAS(newList, adminPin);
+            };
             
             const handleUpdatePin = () => {
                 const newPin = window.prompt("新しい管理者用パスワード（4桁の数字）を入力してください：\n（忘れないようにご注意ください）");
@@ -1780,9 +1791,13 @@
 
                         <div className="bg-surface rounded-xl border border-primary/20 overflow-hidden">
                             <ul className="divide-y divide-primary/10 max-h-96 overflow-y-auto w-full">
-                                {staffList.map(staff => (
+                                {staffList.map((staff, staffIndex) => (
                                     <li key={staff.name} className="bg-white transition-colors">
                                         <div className="p-3 flex items-center gap-2">
+                                            <div className="flex flex-col gap-0.5 shrink-0">
+                                                <button onClick={() => moveStaff(staff.name, -1)} disabled={staffIndex === 0} className="w-7 h-6 leading-none rounded border border-gray-300 text-xs text-gray-600 bg-white disabled:opacity-30 hover:bg-gray-100 transition-colors" title="1つ上へ">▲</button>
+                                                <button onClick={() => moveStaff(staff.name, 1)} disabled={staffIndex === staffList.length - 1} className="w-7 h-6 leading-none rounded border border-gray-300 text-xs text-gray-600 bg-white disabled:opacity-30 hover:bg-gray-100 transition-colors" title="1つ下へ">▼</button>
+                                            </div>
                                             <span className="font-bold text-primary text-base flex-1 truncate">{staff.name}</span>
                                             <button onClick={() => toggleMealSetting(staff.name)} className={`px-3 py-1 rounded-full text-xs font-bold transition-colors whitespace-nowrap ${staff.defaultMeal ? 'bg-secondary text-white' : 'bg-gray-200 text-gray-500'}`}>{staff.defaultMeal ? '賄いあり' : '賄いなし'}</button>
                                             <button onClick={() => toggleOutsourced(staff.name)} className={`px-3 py-1 rounded-full text-xs font-bold transition-colors whitespace-nowrap border-2 ${staff.isOutsourced ? 'bg-orange-500 text-white border-orange-500' : 'bg-white text-gray-400 border-gray-300'}`}>外注者</button>

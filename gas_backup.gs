@@ -49,9 +49,61 @@ function doGet(e) {
     return createJsonResponse({ status: 'ok', settings: settings });
   } else if (action === 'ping') {
     return createJsonResponse({ status: 'ok', message: 'pong', timestamp: new Date().toISOString() });
+  } else if (action === 'getLeaveInfo') {
+    const year = e.parameter.year || String(new Date().getFullYear());
+    const result = getLeaveInfo(year);
+    return createJsonResponse({ status: 'ok', found: result.found, fileName: result.fileName, leaveInfo: result.leaveInfo });
   }
 
   return createJsonResponse({ status: 'error', message: 'Invalid action' });
+}
+
+// ===== 有給休暇管理簿（別スプレッドシート・オーナー管轄）から残日数・次回付与日を読み取る =====
+// このシートはオーナーが手作業で更新している「正本」。ここでは読み取るのみで書き込みは行わない。
+// ファイルは年ごとに新規作成される（例:「年次有給休暇管理簿2026」→翌年は「年次有給休暇管理簿2027」）ため、
+// IDを直接指定せず、決まったフォルダ内をファイル名（年）で毎回検索する。
+const LEAVE_FOLDER_ID = '1ltoDDydrHBW1Yu6R3FX04ffd8Sa-0QEr'; // Googleドライブの「有給」フォルダ
+const LEAVE_FILE_NAME_PREFIX = '年次有給休暇管理簿';
+const LEAVE_SHEET_NAME = '管理簿';
+const LEAVE_NAME_COL = 2;      // B列: 名前
+const LEAVE_NEXT_GRANT_COL = 9; // I列: 基準日（次回付与日）
+const LEAVE_REMAINING_COL = 14; // N列: 有給残日数
+
+function getLeaveInfo(year) {
+  const result = {};
+  try {
+    const folder = DriveApp.getFolderById(LEAVE_FOLDER_ID);
+    const keyword = LEAVE_FILE_NAME_PREFIX + year;
+    const files = folder.searchFiles(`title contains '${keyword.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.spreadsheet'`);
+    if (!files.hasNext()) {
+      // 見つからない場合はアプリ側でアラート表示できるよう found:false を返す（打刻機能自体は止めない）
+      return { found: false, fileName: null, leaveInfo: result };
+    }
+    const file = files.next();
+    const leaveSs = SpreadsheetApp.open(file);
+    const sheet = leaveSs.getSheetByName(LEAVE_SHEET_NAME);
+    if (!sheet) return { found: false, fileName: file.getName(), leaveInfo: result };
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return { found: true, fileName: file.getName(), leaveInfo: result };
+    const values = sheet.getRange(2, 1, lastRow - 1, LEAVE_REMAINING_COL).getValues();
+    for (const row of values) {
+      const name = String(row[LEAVE_NAME_COL - 1] || '').trim();
+      if (!name) continue;
+      const nextGrantRaw = row[LEAVE_NEXT_GRANT_COL - 1];
+      const nextGrant = nextGrantRaw instanceof Date
+        ? Utilities.formatDate(nextGrantRaw, Session.getScriptTimeZone(), 'yyyy/MM/dd')
+        : (nextGrantRaw || '');
+      result[name] = {
+        remainingDays: row[LEAVE_REMAINING_COL - 1],
+        nextGrantDate: nextGrant,
+      };
+    }
+    return { found: true, fileName: file.getName(), leaveInfo: result };
+  } catch (e) {
+    // 有給管理表が読めない場合も打刻機能自体は止めない（見つからなかった扱いにする）
+    console.error('getLeaveInfo error: ' + e.message);
+    return { found: false, fileName: null, leaveInfo: result };
+  }
 }
 
 function doPost(e) {

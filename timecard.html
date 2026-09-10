@@ -1157,6 +1157,95 @@
                         return (h * 3600 + m * 60 + s) / 86400;
                     };
 
+                    // ===== シートレイアウト完全統一ヘルパー =====
+                    // 新規メンバーが何人増えても、草野久美子等の初期メンバーと同一のレイアウトに自動統一
+                    const normalizeSheetLayout = (targetWs, sRow) => {
+                        // 1. 列幅の完全統一（A列〜Q列）
+                        const STANDARD_COL_WIDTHS = [
+                            11.2, // A: 日付
+                            5.2,  // B: 曜日
+                            6.0,  // C: 出勤
+                            13.0, // D: 中抜
+                            13.0, // E: 中抜
+                            6.0,  // F: 退勤
+                            9.2,  // G: 賄い
+                            5.2,  // H
+                            3.1,  // I
+                            13.0, // J
+                            7.1,  // K: 休憩
+                            13.0, // L: 勤務時間
+                            9.0,  // M
+                            13.0, // N
+                            4.6,  // O
+                            12.5, // P: 交通費
+                            13.0  // Q: 備考
+                        ];
+                        STANDARD_COL_WIDTHS.forEach((w, idx) => {
+                            const col = targetWs.getColumn(idx + 1);
+                            col.width = w;
+                        });
+
+                        // 2. 行の高さの完全統一（ヘッダー・日付行は18.75pt、集計行は18.6pt）
+                        for (let r = 1; r <= sRow + 30; r++) {
+                            targetWs.getRow(r).height = 18.75;
+                        }
+                        for (let r = sRow + 31; r <= sRow + 34; r++) {
+                            targetWs.getRow(r).height = 18.6;
+                        }
+
+                        // 3. ヘッダー行の確認・補完（P列: 交通費, Q列: 備考）
+                        try {
+                            const headerRow = targetWs.getRow(sRow - 1);
+                            if (!headerRow.getCell(16).value) headerRow.getCell(16).value = '交通費';
+                            if (!headerRow.getCell(17).value) headerRow.getCell(17).value = '備考';
+                        } catch (e) {}
+
+                        // 4. 土日・日付曜日カラー統一（草野久美子等の初期シートと完全一致）
+                        for (let d = 1; d <= 31; d++) {
+                            const r = targetWs.getRow(sRow + d - 1);
+                            const cellA = r.getCell(1);
+                            const cellB = r.getCell(2);
+                            if (d <= daysInMonth) {
+                                const targetDateObj = new Date(year, month - 1, d);
+                                const dayOfWeek = targetDateObj.getDay(); // 0: 日, 6: 土
+                                const fontA = { ...(cellA.font || { name: 'Yu Gothic', size: 11 }) };
+                                const fontB = { ...(cellB.font || { name: 'Yu Gothic', size: 11 }) };
+
+                                if (dayOfWeek === 6) {
+                                    // 土曜日: 水色背景 (#DDEBF7), 青文字 (#5B9BD5)
+                                    const satFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBF7' } };
+                                    cellA.fill = satFill;
+                                    cellB.fill = satFill;
+                                    fontA.color = { argb: 'FF5B9BD5' };
+                                    fontB.color = { argb: 'FF5B9BD5' };
+                                    cellA.font = fontA;
+                                    cellB.font = fontB;
+                                } else if (dayOfWeek === 0) {
+                                    // 日曜日: 薄赤/サーモン背景 (#FCE4D6), 赤文字 (#FF0000)
+                                    const sunFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE4D6' } };
+                                    cellA.fill = sunFill;
+                                    cellB.fill = sunFill;
+                                    fontA.color = { argb: 'FFFF0000' };
+                                    fontB.color = { argb: 'FFFF0000' };
+                                    cellA.font = fontA;
+                                    cellB.font = fontB;
+                                } else {
+                                    // 平日: 塗りつぶしなし, 通常黒文字
+                                    cellA.fill = null;
+                                    cellB.fill = null;
+                                    fontA.color = { argb: 'FF000000' };
+                                    fontB.color = { argb: 'FF000000' };
+                                    cellA.font = fontA;
+                                    cellB.font = fontB;
+                                }
+                            } else {
+                                // 月末以降（29〜31日の余白）
+                                cellA.fill = null;
+                                cellB.fill = null;
+                            }
+                        }
+                    };
+
                     // ステップ1: 全シートの日付・曜日・データセルを対象月に書き換え
                     workbook.eachSheet((ws) => {
                         // ヘッダー行を探す（「出勤」「退勤」「曜日」を含む行）
@@ -1197,6 +1286,8 @@
                                 row.getCell(2).value = ['日', '月', '火', '水', '木', '金', '土'][targetDateObj.getDay()];
                             }
                         }
+                        // レイアウト・書式を完全統一
+                        normalizeSheetLayout(ws, startRow);
                     });
 
                     // ステップ2: staffListに登録されたスタッフのシートに勤怠データを書き込み
@@ -1267,6 +1358,7 @@
                                         r.getCell(2).value = ['日', '月', '火', '水', '木', '金', '土'][tDateObj.getDay()];
                                     }
                                 }
+                                normalizeSheetLayout(ws, sRow);
                             }
                         }
 
@@ -1424,6 +1516,9 @@
                             const row39 = ws.getRow(startRow + 37); // 39行目相当
                             if (!row39.getCell(14).value) row39.getCell(14).value = '有給休暇：週30時間以上なら → 正社員と同じ表（初回10日）';
                         } catch (e) { console.warn('保険情報の補完に失敗', e); }
+
+                        // レイアウト・書式・土日カラーを全スタッフのシートに統一適用（草野久美子等の初期シートと同一）
+                        normalizeSheetLayout(ws, startRow);
                     });
 
                     // ステップ3: 対象月に出勤記録がないスタッフのシートを削除
@@ -1517,6 +1612,95 @@
                         return (h * 3600 + m * 60 + s) / 86400;
                     };
 
+                    // ===== シートレイアウト完全統一ヘルパー =====
+                    // 新規メンバーが何人増えても、草野久美子等の初期メンバーと同一のレイアウトに自動統一
+                    const normalizeSheetLayout = (targetWs, sRow) => {
+                        // 1. 列幅の完全統一（A列〜Q列）
+                        const STANDARD_COL_WIDTHS = [
+                            11.2, // A: 日付
+                            5.2,  // B: 曜日
+                            6.0,  // C: 出勤
+                            13.0, // D: 中抜
+                            13.0, // E: 中抜
+                            6.0,  // F: 退勤
+                            9.2,  // G: 賄い
+                            5.2,  // H
+                            3.1,  // I
+                            13.0, // J
+                            7.1,  // K: 休憩
+                            13.0, // L: 勤務時間
+                            9.0,  // M
+                            13.0, // N
+                            4.6,  // O
+                            12.5, // P: 交通費
+                            13.0  // Q: 備考
+                        ];
+                        STANDARD_COL_WIDTHS.forEach((w, idx) => {
+                            const col = targetWs.getColumn(idx + 1);
+                            col.width = w;
+                        });
+
+                        // 2. 行の高さの完全統一（ヘッダー・日付行は18.75pt、集計行は18.6pt）
+                        for (let r = 1; r <= sRow + 30; r++) {
+                            targetWs.getRow(r).height = 18.75;
+                        }
+                        for (let r = sRow + 31; r <= sRow + 34; r++) {
+                            targetWs.getRow(r).height = 18.6;
+                        }
+
+                        // 3. ヘッダー行の確認・補完（P列: 交通費, Q列: 備考）
+                        try {
+                            const headerRow = targetWs.getRow(sRow - 1);
+                            if (!headerRow.getCell(16).value) headerRow.getCell(16).value = '交通費';
+                            if (!headerRow.getCell(17).value) headerRow.getCell(17).value = '備考';
+                        } catch (e) {}
+
+                        // 4. 土日・日付曜日カラー統一（草野久美子等の初期シートと完全一致）
+                        for (let d = 1; d <= 31; d++) {
+                            const r = targetWs.getRow(sRow + d - 1);
+                            const cellA = r.getCell(1);
+                            const cellB = r.getCell(2);
+                            if (d <= daysInMonth) {
+                                const targetDateObj = new Date(year, month - 1, d);
+                                const dayOfWeek = targetDateObj.getDay(); // 0: 日, 6: 土
+                                const fontA = { ...(cellA.font || { name: 'Yu Gothic', size: 11 }) };
+                                const fontB = { ...(cellB.font || { name: 'Yu Gothic', size: 11 }) };
+
+                                if (dayOfWeek === 6) {
+                                    // 土曜日: 水色背景 (#DDEBF7), 青文字 (#5B9BD5)
+                                    const satFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBF7' } };
+                                    cellA.fill = satFill;
+                                    cellB.fill = satFill;
+                                    fontA.color = { argb: 'FF5B9BD5' };
+                                    fontB.color = { argb: 'FF5B9BD5' };
+                                    cellA.font = fontA;
+                                    cellB.font = fontB;
+                                } else if (dayOfWeek === 0) {
+                                    // 日曜日: 薄赤/サーモン背景 (#FCE4D6), 赤文字 (#FF0000)
+                                    const sunFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE4D6' } };
+                                    cellA.fill = sunFill;
+                                    cellB.fill = sunFill;
+                                    fontA.color = { argb: 'FFFF0000' };
+                                    fontB.color = { argb: 'FFFF0000' };
+                                    cellA.font = fontA;
+                                    cellB.font = fontB;
+                                } else {
+                                    // 平日: 塗りつぶしなし, 通常黒文字
+                                    cellA.fill = null;
+                                    cellB.fill = null;
+                                    fontA.color = { argb: 'FF000000' };
+                                    fontB.color = { argb: 'FF000000' };
+                                    cellA.font = fontA;
+                                    cellB.font = fontB;
+                                }
+                            } else {
+                                // 月末以降（29〜31日の余白）
+                                cellA.fill = null;
+                                cellB.fill = null;
+                            }
+                        }
+                    };
+
                     const workbook = new ExcelJS.Workbook();
                     const b64 = EXCEL_TEMPLATE_B64;
                     const binaryStr = atob(b64);
@@ -1560,6 +1744,7 @@
                                 row.getCell(2).value = ['日','月','火','水','木','金','土'][targetDateObj.getDay()];
                             }
                         }
+                        normalizeSheetLayout(ws, startRow);
                     });
 
                     // ステップ2: 外注者のデータを書き込み（賄いは書かない）
@@ -1617,6 +1802,7 @@
                                         r.getCell(2).value = ['日','月','火','水','木','金','土'][tDateObj.getDay()];
                                     }
                                 }
+                                normalizeSheetLayout(ws, sRow);
                             }
                         }
 
@@ -1726,6 +1912,9 @@
                         setPayRow(4, '報酬', { formula: `ROUND(D${blockStart + 1}*D${blockStart + 2},0)` }, moneyFmt, '勤務時間合計 × 時給', false);
                         setPayRow(5, '交通費合計', { formula: `SUM(P${startRow}:P${startRow + 30})` }, moneyFmt, 'P列（日別交通費）の合計', false);
                         setPayRow(6, '請求合計', { formula: `D${blockStart + 4}+D${blockStart + 5}` }, moneyFmt, '報酬 ＋ 交通費合計', true);
+
+                        // レイアウト・書式・土日カラーを全スタッフのシートに統一適用（草野久美子等の初期シートと同一）
+                        normalizeSheetLayout(ws, startRow);
 
                         outsourcedPayData[staff.name] = true;
                     });

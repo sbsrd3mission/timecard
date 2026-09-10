@@ -1296,8 +1296,12 @@
                         }
                         if (startRow === -1) startRow = 2;
 
-                        // P列ヘッダー「交通費」（税理士様式に既にある場合は上書きしない）
-                        try { const hr0 = ws.getRow(startRow - 1); if (!hr0.getCell(16).value) hr0.getCell(16).value = '交通費'; } catch (e) {}
+                        // P列ヘッダー「交通費」・Q列ヘッダー「備考」（税理士様式に既にある場合は上書きしない）
+                        try {
+                            const hr0 = ws.getRow(startRow - 1);
+                            if (!hr0.getCell(16).value) hr0.getCell(16).value = '交通費';
+                            if (!hr0.getCell(17).value) hr0.getCell(17).value = '備考';
+                        } catch (e) {}
 
                         for (let d = 1; d <= daysInMonth; d++) {
                             const row = ws.getRow(startRow + d - 1);
@@ -1375,27 +1379,51 @@
                         try {
                             const leaveRow33 = ws.getRow(startRow + 31); // 33行目相当
                             const leaveRow34 = ws.getRow(startRow + 32); // 34行目相当
-                            leaveRow33.getCell(1).value = '有休消化';
-                            leaveRow33.getCell(3).value = '残有休日数';
-                            leaveRow34.getCell(3).value = '次回発生';
+                            // フォントスタイルを明示的に黒・非太字に統一（テンプレート残存の赤字太字を上書き）
+                            const normalFont = { bold: false, color: { argb: 'FF000000' }, size: 11, name: 'Yu Gothic' };
+                            const setNormalCell = (row, col, val) => {
+                                const c = row.getCell(col);
+                                c.value = val;
+                                c.font = normalFont;
+                            };
+                            setNormalCell(leaveRow33, 1, '有休消化');
+                            setNormalCell(leaveRow33, 3, '残有休日数');
+                            setNormalCell(leaveRow34, 3, '次回発生');
 
                             const usedThisMonth = timeRecords.filter(r =>
                                 r.id && r.id.startsWith(`${staff.name}_${year}-${String(month).padStart(2, '0')}`) && r.isPaidLeave
                             ).length;
-                            leaveRow33.getCell(2).value = usedThisMonth;
+                            setNormalCell(leaveRow33, 2, usedThisMonth);
 
                             const info = leaveInfo && leaveInfo[normalizeNameForMatch(staff.name)];
                             if (info) {
-                                leaveRow33.getCell(5).value = (info.remainingDays !== undefined && info.remainingDays !== null && info.remainingDays !== '')
-                                    ? `${info.remainingDays}日` : '';
-                                leaveRow34.getCell(5).value = info.nextGrantDate
+                                setNormalCell(leaveRow33, 5, (info.remainingDays !== undefined && info.remainingDays !== null && info.remainingDays !== '')
+                                    ? `${info.remainingDays}日` : '');
+                                setNormalCell(leaveRow34, 5, info.nextGrantDate
                                     ? String(info.nextGrantDate).replace(/\//g, '.').replace(/\.0(\d)/g, '.$1')
-                                    : '';
+                                    : '');
                             } else {
-                                leaveRow33.getCell(5).value = '未登録';
-                                leaveRow34.getCell(5).value = '';
+                                setNormalCell(leaveRow33, 5, '未登録');
+                                setNormalCell(leaveRow34, 5, '');
                             }
                         } catch (e) { console.warn('有給欄の書き込みに失敗', e); }
+
+                        // ===== 週間勤務時間・判定・保険情報の補完（テンプレート内シートとの統一） =====
+                        // マスタからコピーしたシートにはR36-39の情報が無いため、全シート共通で補完する。
+                        // 既にテンプレートに値がある場合は上書きしない。
+                        try {
+                            const row36 = ws.getRow(startRow + 34); // 36行目相当
+                            if (!row36.getCell(12).value) row36.getCell(12).value = { formula: `L${startRow + 32}*12/52` };
+                            if (!row36.getCell(12).numFmt) row36.getCell(12).numFmt = 'h:mm';
+                            if (!row36.getCell(13).value) row36.getCell(13).value = '/週';
+                            if (!row36.getCell(14).value) row36.getCell(14).value = '判定';
+                            const row37 = ws.getRow(startRow + 35); // 37行目相当
+                            if (!row37.getCell(14).value) row37.getCell(14).value = '雇用保険：週20時間以上＋31日以上見込み ⇒ 加入';
+                            const row38 = ws.getRow(startRow + 36); // 38行目相当
+                            if (!row38.getCell(14).value) row38.getCell(14).value = '社会保険（健康保険・厚生年金）：\n3/4ルール（週30時間以上 or 週5日以上）に該当 ⇒ 加入';
+                            const row39 = ws.getRow(startRow + 37); // 39行目相当
+                            if (!row39.getCell(14).value) row39.getCell(14).value = '有給休暇：週30時間以上なら → 正社員と同じ表（初回10日）';
+                        } catch (e) { console.warn('保険情報の補完に失敗', e); }
                     });
 
                     // ステップ3: 対象月に出勤記録がないスタッフのシートを削除

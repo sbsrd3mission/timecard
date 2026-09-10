@@ -1071,9 +1071,25 @@
                     // （直列にすると出力が体感1分近く遅くなるため、同時に走らせて待ち時間を短縮する）
                     let leaveInfo = {};
                     if (gasUrl) {
+                        // 有給管理表取得用の関数（レスポンス検証＋リトライ付き）
+                        const fetchLeaveInfo = async (retries = 1) => {
+                            const r = await fetch(gasUrl + '?action=getLeaveInfo&year=' + year, { method: 'GET', cache: 'no-store' });
+                            const ct = r.headers.get('content-type') || '';
+                            if (!ct.includes('application/json')) {
+                                // GASが一時的にHTMLエラーページを返すことがある（権限・タイムアウト等）
+                                const bodySnippet = (await r.text()).substring(0, 120);
+                                if (retries > 0) {
+                                    console.warn('getLeaveInfo: JSONでないレスポンスを受信、リトライします', bodySnippet);
+                                    await new Promise(ok => setTimeout(ok, 2000));
+                                    return fetchLeaveInfo(retries - 1);
+                                }
+                                throw new Error('GASからJSONが返りませんでした（HTMLエラーページ）。GASのデプロイまたはDriveApp権限を確認してください。');
+                            }
+                            return r.json();
+                        };
                         const [syncOutcome, leaveOutcome] = await Promise.allSettled([
                             syncFromGAS(gasUrl),
-                            fetch(gasUrl + '?action=getLeaveInfo&year=' + year).then(r => r.json()),
+                            fetchLeaveInfo(),
                         ]);
 
                         // クラウド同期の結果を確認

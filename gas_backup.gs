@@ -42,25 +42,33 @@ const OP_TOO_OLD_DAYS = 180;
 // ===== 試験中は本番に書けないようにする（3.8-7） =====
 // スクリプトのプロパティに MODE=test と TEST_ALLOWED_FILE_IDS（使ってよいファイルIDをカンマ区切り）を登録すると、
 // 登録外のファイルを開こうとしたら処理を止める。本番のファイルIDは下に書いておき、MODE=test では必ず止める。
-// ※ 本番の勤怠ファイル・管理簿の原本の ID は反映手順書に沿ってここへ書き込む（空のままでも、許可リスト外は止まる）。
+// 【コードレビュー1-10】本番の ID はコードに書かず、スクリプト プロパティ PROD_TIMECARD_SS_IDS / PROD_LEAVE_BOOK_IDS
+// （カンマ区切り）に置く。本番の Apps Script で registerProductionIds() を1回実行すると自動で登録される（反映手順書 5）。
+// 下の2つはコードに直接書きたいとき用の予備（ふだんは空のまま）。
 const PROD_TIMECARD_SS_IDS = [/* 本番「タイムカードバックアップ」のID */];
 const PROD_LEAVE_BOOK_IDS = [/* 本番「年次有給休暇管理簿20xx」のID */];
+function propIdList(key) {
+  return String(PropertiesService.getScriptProperties().getProperty(key) || '').split(',').map(function(x) { return x.trim(); }).filter(Boolean);
+}
+function prodTimecardIds() { return PROD_TIMECARD_SS_IDS.concat(propIdList('PROD_TIMECARD_SS_IDS')); }
+function prodLeaveBookIds() { return PROD_LEAVE_BOOK_IDS.concat(propIdList('PROD_LEAVE_BOOK_IDS')); }
 // 【3.9-7】実行中のスプレッドシートが本番の ID でなければ、MODE=test が無くても試験扱いにする（設定し忘れの防止）。
-// ※ PROD_TIMECARD_SS_IDS が空のまま（本番 ID 未記入）のときは自動判定できないので、MODE だけで決める。
+// ※ 本番 ID が未登録のときは自動判定できないので、MODE だけで決める。
 let TEST_MODE_MEMO = null;
 function isTestMode() {
   if (TEST_MODE_MEMO !== null) return TEST_MODE_MEMO;
   let test = PropertiesService.getScriptProperties().getProperty('MODE') === 'test';
-  if (!test && PROD_TIMECARD_SS_IDS.length > 0) {
+  const prodIds = prodTimecardIds();
+  if (!test && prodIds.length > 0) {
     const active = SpreadsheetApp.getActiveSpreadsheet();
-    test = !active || PROD_TIMECARD_SS_IDS.indexOf(active.getId()) === -1;
+    test = !active || prodIds.indexOf(active.getId()) === -1;
   }
   TEST_MODE_MEMO = test;
   return test;
 }
 function assertFileAllowed(id, what) {
   if (!isTestMode()) return;
-  if (PROD_TIMECARD_SS_IDS.concat(PROD_LEAVE_BOOK_IDS).indexOf(id) !== -1) throw new Error('試験モードでは本番のファイルを開けません: ' + (what || id));
+  if (prodTimecardIds().concat(prodLeaveBookIds()).indexOf(id) !== -1) throw new Error('試験モードでは本番のファイルを開けません: ' + (what || id));
   const allowed = String(PropertiesService.getScriptProperties().getProperty('TEST_ALLOWED_FILE_IDS') || '').split(',').map(function(x) { return x.trim(); }).filter(Boolean);
   if (allowed.indexOf(id) === -1) throw new Error('試験モードで許可されていないファイルです: ' + (what || id));
 }
@@ -152,6 +160,9 @@ function doGet(e) {
   } else if (action === 'reportDevice') {
     // 端末名と未送信の件数の知らせ（3.11-5）
     return createJsonResponse(reportDevice(e.parameter));
+  } else if (action === 'removeDevice') {
+    // 管理画面の「この端末を一覧から消す」（コードレビュー1-8）
+    return createJsonResponse(removeDevice(e.parameter));
   } else if (action === 'deviceStatus') {
     return createJsonResponse({ status: 'ok', devices: listRegisteredDevices(), serverTimeMs: Date.now() });
   } else if (action === 'ping') {
@@ -539,6 +550,8 @@ function doPost(e) {
     return createJsonResponse({ status: 'error', message: 'old_client' });
   }
 
+  if (action === 'ops') return handleOps(ss, postData);
+
   // ===== 排他制御（ロック機能）の追加 =====
   // 複数のPCからの通信が重なった際、最大10秒間待機して順番に確実に処理する
   // （順番待ちを超えた場合も HTTP は 200 で status:'error' を返す。アプリは中身で判定して再送する）
@@ -550,76 +563,7 @@ function doPost(e) {
   }
 
   try {
-    if (action === 'ops') {
-      const ops = Array.isArray(postData.ops) ? postData.ops : [];
-      const sender = String(postData.sender || '').substring(0, 40);
-      const serverNow = Date.now();
-      // 時計のずれの目安（警告・EditLog 用）: 受信時刻－端末の送信時刻(sentAt)。通信の遅れも含むので、
-      // 操作の時刻を直すのには使わない（直すのは操作に付いた offsetAtOp。3.11-3）
-      const sentAt = Number(postData.sentAt || postData.clientNow);
-      const skewMs = isFinite(sentAt) && sentAt > 0 ? serverNow - sentAt : 0;
-      if (Math.abs(skewMs) >= CLOCK_SKEW_WARN_MS) logClockSkew(ss, sender, skewMs);
-      const opLog = loadOpLog(ss);
-      const results = {};
-      ops.forEach(function(op) {
-        const opId = op && typeof op.opId === 'string' ? op.opId : '';
-        if (!opId) { results[''] = { result: 'invalid', reason: 'opIdがありません' }; return; }
-        const logged = opLog.map[opId];
-        // 同じ opId がもう一度届いたら、書き込まずに最初の結果を返す（3.6-4）
-        if (logged && logged.result !== OPLOG_ACCEPTED) { results[opId] = { result: logged.result, reason: logged.reason, duplicate: true }; return; }
-        let normAt, seq, logRow = null;
-        // 当て直し（3.12-1）: 「受付」に残した変更前の値と「EditLog 済み」の印を使う
-        const ctx = { resumed: !!logged, editLogged: !!(logged && logged.editLogged) };
-        if (logged) {
-          // 「受付」のまま残っていた（前回が途中で止まった）: 記録してある比較時刻・受付順でもう一度当てる（3.9-2）
-          normAt = logged.normAt; seq = logged.seq; logRow = logged.ref;
-          ctx.accept = function(before) { return logged.before || before; };
-        } else {
-          // 比べる時刻と受付順は、最初に受け付けたときに決めて OpLog に残す（3.8-2・3.9-2）
-          normAt = normalizeOpTime(op, serverNow);
-          seq = nextOpSeq();
-          if (normAt < serverNow - OP_TOO_OLD_DAYS * 86400000) {
-            // OpLog に無く、180日より古い操作は当てない（3.8-8）
-            const r0 = { result: 'skipped', reason: 'too_old' };
-            appendOpLogRow(ss, opLogRowValues(op, r0.result, r0.reason, serverNow, sender, normAt, seq), serverNow);
-            opLog.map[opId] = { result: r0.result, reason: r0.reason };
-            results[opId] = r0;
-            return;
-          }
-          // ① 書く内容を決めたら（読むだけ）、勤怠を書く前に「受付」を書く。変更前の値も一緒に残す（3.9-2・3.12-1）
-          ctx.accept = function(before) {
-            logRow = appendOpLogRow(ss, opLogRowValues(op, OPLOG_ACCEPTED, '', serverNow, sender, normAt, seq, before), serverNow);
-            opLog.map[opId] = { result: OPLOG_ACCEPTED, reason: '', normAt: normAt, seq: seq, ref: logRow, before: before };
-            return before;
-          };
-        }
-        // ② 勤怠の行と EditLog を書く（1日分の1〜17列を1回で）。EditLog を書いたら「EditLog 済み」の印も同じ手順で付ける
-        ctx.markEditLogged = function() { if (logRow) markOpLogEditLogged(ss, logRow); };
-        let res;
-        try {
-          res = applyOp(ss, op, sender, serverNow, normAt, seq, ctx);
-        } catch (err) {
-          console.error('applyOp failed', err);
-          res = { result: 'error', reason: String(err && err.message ? err.message : err) };
-        }
-        results[opId] = res;
-        // ③ OpLog を「完了」にする。error（一時的な失敗）は「受付」のまま残す＝再送で同じ時刻・受付順で当て直す
-        if (res.result !== 'error') {
-          if (logRow) finishOpLogRow(ss, logRow, res.result, res.reason);
-          else appendOpLogRow(ss, opLogRowValues(op, res.result, res.reason, serverNow, sender, normAt, seq), serverNow); // 書く前に決まった結果（invalid など）
-          opLog.map[opId] = { result: res.result, reason: res.reason || '' };
-        }
-        if (res.result === 'applied') {
-          // 書いたらすぐ世代を進める（途中で止まっても、書いた分のキャッシュは使われない）
-          bumpCacheGeneration();
-        }
-      });
-      // 書き込みの返事にも世代番号を入れる（3.8-5）
-      const out = { status: 'ok', results: results, serverTime: new Date(serverNow).toISOString(), generation: Number(getCacheGeneration(true)) || 0 };
-      out.skewMs = skewMs;
-      if (Math.abs(skewMs) >= CLOCK_SKEW_WARN_MS) out.clockSkewMs = skewMs;
-      return createJsonResponse(out);
-    } else if (action === 'saveSettings') {
+    if (action === 'saveSettings') {
       const result = saveSettings(ss, postData.settings);
       return createJsonResponse(result);
     }
@@ -628,6 +572,110 @@ function doPost(e) {
   }
 
   return createJsonResponse({ status: 'error', message: 'Invalid action' });
+}
+
+// ===== 操作（ops）の受付 =====
+// 【コードレビュー1-11】スクリプトのロックは「操作1つごと」に取って放す（まとめて届いた未送信の途中でも、
+// もう1台の打刻が割り込める）。書く順番（受付→flush→勤怠・EditLog→flush→完了→flush）は操作ごとに今までどおり。
+// ロックを取るたびに OpLog の増えた行と、この opId の行を読み直す（他の実行が同じ opId を先に処理していても二重に当てない）。
+function handleOps(ss, postData) {
+  const ops = Array.isArray(postData.ops) ? postData.ops : [];
+  const sender = String(postData.sender || '').substring(0, 40);
+  const receivedAt = Date.now();
+  // 時計のずれの目安（警告・EditLog 用）: 受信時刻－端末の送信時刻(sentAt)。通信の遅れも含むので、
+  // 操作の時刻を直すのには使わない（直すのは操作に付いた offsetAtOp。3.11-3）
+  const sentAt = Number(postData.sentAt || postData.clientNow);
+  const skewMs = isFinite(sentAt) && sentAt > 0 ? receivedAt - sentAt : 0;
+  const opLog = { map: {}, lastRows: {}, loaded: false };
+  const results = {};
+  let processed = 0;
+  let busy = false;
+  let skewLogged = Math.abs(skewMs) < CLOCK_SKEW_WARN_MS;
+  ops.forEach(function(op) {
+    const opId = op && typeof op.opId === 'string' ? op.opId : '';
+    if (!opId) { results[''] = { result: 'invalid', reason: 'opIdがありません' }; return; }
+    // 順番待ちを超えたら、残りの操作は待たずに「一時エラー」で返す（端末が再送する）
+    if (busy) { results[opId] = { result: 'error', reason: 'busy' }; return; }
+    const lock = LockService.getScriptLock();
+    try { lock.waitLock(10000); } catch (err) { busy = true; results[opId] = { result: 'error', reason: 'busy' }; return; }
+    try {
+      if (!skewLogged) { skewLogged = true; logClockSkew(ss, sender, skewMs); }
+      refreshOpLog(ss, opLog, opId);
+      results[opId] = processOneOp(ss, op, opId, sender, Date.now(), opLog);
+      processed++;
+    } finally {
+      lock.releaseLock();
+    }
+  });
+  if (processed === 0 && busy) return createJsonResponse({ status: 'error', message: 'Server busy. Please try again.' });
+  // 書き込みの返事にも世代番号を入れる（3.8-5）
+  const out = { status: 'ok', results: results, serverTime: new Date(receivedAt).toISOString(), generation: Number(getCacheGeneration(true)) || 0 };
+  out.skewMs = skewMs;
+  if (Math.abs(skewMs) >= CLOCK_SKEW_WARN_MS) out.clockSkewMs = skewMs;
+  return createJsonResponse(out);
+}
+
+// 操作1つを当てる（ロックの中で呼ぶ）
+function processOneOp(ss, op, opId, sender, serverNow, opLog) {
+  const logged = opLog.map[opId];
+  // 同じ opId がもう一度届いたら、書き込まずに最初の結果を返す（3.6-4）
+  if (logged && logged.result !== OPLOG_ACCEPTED) {
+    const dup = { result: logged.result, reason: logged.reason, duplicate: true };
+    if (logged.before && logged.before.c) dup.corrected = logged.before.c;
+    return dup;
+  }
+  let normAt, seq, logRow = null;
+  // 当て直し（3.12-1）: 「受付」に残した変更前の値・書く値と「EditLog 済み」の印を使う
+  const ctx = { resumed: !!logged, editLogged: !!(logged && logged.editLogged), stored: logged ? logged.before : null };
+  if (logged) {
+    // 「受付」のまま残っていた（前回が途中で止まった）: 記録してある比較時刻・受付順でもう一度当てる（3.9-2）
+    normAt = logged.normAt; seq = logged.seq; logRow = logged.ref;
+    // 前回の書き込みが届いていなかったとき: 今の値を変更前の値として残し直す（2回目に止まっても正しい EditLog を作れる）
+    ctx.accept = function(before) {
+      if (logRow && JSON.stringify(before) !== JSON.stringify(logged.before)) {
+        getOpLogSheet(ss, logRow.sheet, true).getRange(logRow.row, 12).setValue(JSON.stringify(before));
+        SpreadsheetApp.flush();
+        logged.before = before;
+      }
+      return before;
+    };
+  } else {
+    // 比べる時刻と受付順は、最初に受け付けたときに決めて OpLog に残す（3.8-2・3.9-2）
+    normAt = normalizeOpTime(op, serverNow);
+    seq = nextOpSeq();
+    if (normAt < serverNow - OP_TOO_OLD_DAYS * 86400000) {
+      // OpLog に無く、180日より古い操作は当てない（3.8-8）
+      const r0 = { result: 'skipped', reason: 'too_old' };
+      appendOpLogRow(ss, opLogRowValues(op, r0.result, r0.reason, serverNow, sender, normAt, seq), serverNow);
+      opLog.map[opId] = { result: r0.result, reason: r0.reason };
+      return r0;
+    }
+    // ① 書く内容を決めたら（読むだけ）、勤怠を書く前に「受付」を書く。変更前の値・書く値も一緒に残す（3.9-2・3.12-1）
+    ctx.accept = function(before) {
+      logRow = appendOpLogRow(ss, opLogRowValues(op, OPLOG_ACCEPTED, '', serverNow, sender, normAt, seq, before), serverNow);
+      opLog.map[opId] = { result: OPLOG_ACCEPTED, reason: '', normAt: normAt, seq: seq, ref: logRow, before: before };
+      return before;
+    };
+  }
+  // ② 勤怠の行と EditLog を書く（1日分の1〜17列を1回で）。EditLog を書けたら「EditLog 済み」の印を付ける
+  ctx.markEditLogged = function() { if (logRow) markOpLogEditLogged(ss, logRow); };
+  let res;
+  try {
+    res = applyOp(ss, op, sender, serverNow, normAt, seq, ctx);
+  } catch (err) {
+    console.error('applyOp failed', err);
+    res = { result: 'error', reason: String(err && err.message ? err.message : err) };
+  }
+  // 勤怠の行を書いたらすぐ世代を進める（EditLog の失敗で「受付」のまま残るときも。書いた分のキャッシュは使わない）
+  if (res.wrote) bumpCacheGeneration();
+  delete res.wrote;
+  // ③ OpLog を「完了」にする。error（一時的な失敗）は「受付」のまま残す＝再送で同じ時刻・受付順で当て直す
+  if (res.result !== 'error') {
+    if (logRow) finishOpLogRow(ss, logRow, res.result, res.reason);
+    else appendOpLogRow(ss, opLogRowValues(op, res.result, res.reason, serverNow, sender, normAt, seq), serverNow); // 書く前に決まった結果（invalid など）
+    opLog.map[opId] = { result: res.result, reason: res.reason || '', before: (opLog.map[opId] || {}).before };
+  }
+  return res;
 }
 
 // ===== 端末の未送信の知らせ（3.11-5・3.12-4） =====
@@ -643,6 +691,10 @@ function reportDevice(p) {
   PropertiesService.getScriptProperties().setProperty(DEVICE_PROP_PREFIX + id, JSON.stringify(info));
   return { status: 'ok' };
 }
+// 【コードレビュー1-8】30日以内に知らせのあった端末は、名前が無くてもすべて「知っている端末」として返す
+// （名前を付け忘れた端末も、エクセル出力前の確認から漏れない）。30日より前の知らせは古い端末として返さない。
+// 管理画面から、もう使わない端末（ブラウザの履歴を消して ID が変わった等）を removeDevice で消せる。
+const DEVICE_KNOWN_DAYS = 30;
 function listRegisteredDevices() {
   const all = PropertiesService.getScriptProperties().getProperties();
   const now = Date.now();
@@ -651,10 +703,18 @@ function listRegisteredDevices() {
     if (k.indexOf(DEVICE_PROP_PREFIX) !== 0) return;
     let v = null;
     try { v = JSON.parse(all[k]); } catch (e) { return; }
-    if (!v || !v.name) return; // 名前の無い端末は登録端末ではない
-    out.push({ id: k.substring(DEVICE_PROP_PREFIX.length), name: v.name, pending: Number(v.pending) || 0, at: new Date(Number(v.at)).toISOString(), ageMs: now - Number(v.at) });
+    if (!v || !isFinite(Number(v.at))) return;
+    const ageMs = now - Number(v.at);
+    if (ageMs > DEVICE_KNOWN_DAYS * 86400000) return;
+    out.push({ id: k.substring(DEVICE_PROP_PREFIX.length), name: String(v.name || ''), pending: Number(v.pending) || 0, at: new Date(Number(v.at)).toISOString(), ageMs: ageMs });
   });
   return out;
+}
+function removeDevice(p) {
+  const id = String(p.id || '').replace(/[^\w\-]/g, '').substring(0, 40);
+  if (!id) return { status: 'error', message: 'id がありません' };
+  PropertiesService.getScriptProperties().deleteProperty(DEVICE_PROP_PREFIX + id);
+  return { status: 'ok' };
 }
 
 // 比べる時刻（3.11-3・3.12-2）: 端末が ping で測ったずれ（操作を作ったときの offsetAtOp＝サーバー時刻－端末時刻）があれば
@@ -841,8 +901,9 @@ function hasMetaCell(row) {
   const meta = parseMeta(raw);
   const su = row[COL.serverUpdatedAt - 1];
   const suMs = su instanceof Date ? su.getTime() : (su ? Date.parse(String(su)) : NaN);
-  // 新しい版は10列目と savedAt に同じ値（秒にそろえた時刻）を書く。ぴったり一致しなければ古い版で書かれた行（3.12-3）
-  if (!meta.savedAt || !isFinite(suMs) || Math.round(suMs) !== Number(meta.savedAt)) return false;
+  // 新しい版は10列目と savedAt に同じ値（秒にそろえた時刻）を書く。秒の単位で一致しなければ古い版で書かれた行（3.12-3）。
+  // 【コードレビュー1-6】スプレッドシートの日時は小数で持つため、読み出すと数ミリ秒ずれることがある → 秒にそろえて比べる
+  if (!meta.savedAt || !isFinite(suMs) || Math.round(suMs / 1000) !== Math.round(Number(meta.savedAt) / 1000)) return false;
   return true;
 }
 function metaForRow(row) {
@@ -926,7 +987,7 @@ function getOneRecord(ss, staffName, dateStr) {
 
 // ===== キャッシュ分割保存 =====
 // CacheServiceは1キーあたり100KBまでしか保存できないため、
-// 応答JSON（現在135KB超）を90KBずつのチャンクに分割して保存・復元する。
+// 応答JSON（現在135KB超）を分割して保存・復元する（1つ 90KB 以下）。
 function cacheBaseKey(rangeKey, gen) {
   return RECORDS_CACHE_KEY + '_' + rangeKey + '_' + gen;
 }
@@ -936,11 +997,18 @@ function putRecordsCache(rangeKey, gen, payload) {
   try {
     const cache = CacheService.getScriptCache();
     const base = cacheBaseKey(rangeKey, gen);
-    const CHUNK_SIZE = 90000;
+    // 【コードレビュー1-7】100KB の上限は UTF-8 のバイト数。1文字（UTF-16 の1単位）は最大3バイトなので、
+    // 30,000 文字ずつに分ければ 1つ 90KB 以下になる（日本語ばかりでも超えない）。サロゲートペアは途中で切らない。
+    const CHUNK_SIZE = 30000;
     const entries = {};
     let n = 0;
-    for (let i = 0; i < payload.length; i += CHUNK_SIZE) {
-      entries[base + '_' + n] = payload.substring(i, i + CHUNK_SIZE);
+    let i = 0;
+    while (i < payload.length) {
+      let end = Math.min(i + CHUNK_SIZE, payload.length);
+      const last = payload.charCodeAt(end - 1);
+      if (end < payload.length && last >= 0xD800 && last <= 0xDBFF) end--;
+      entries[base + '_' + n] = payload.substring(i, end);
+      i = end;
       n++;
     }
     entries[base + '_meta'] = String(n);
@@ -1074,6 +1142,33 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, ctx) {
   const oldRow = exists ? found.row.slice() : blankRow(dateStr);
   const meta = metaForRow(oldRow);
 
+  // 打刻の時刻を直したときは、端末の画面も直せるように返事に入れる（コードレビュー1-9）
+  const corrected = clockFix ? { date: dateStr, field: opData.field, time: opData.time, fromDate: String(op.date || '') } : undefined;
+
+  // 【コードレビュー1-1】当て直し: 前回の勤怠の書き込みが届いていたか（17列目の項目にこの操作の時刻と受付順があるか）。
+  // 1回で1〜17列を書くので、1項目でも残っていれば書けている。届いていれば書き直さず、EditLog を（まだなら）
+  // 「受付」に残した変更前の値と書く値から作って、最初に決めた結果（applied）を返す。
+  const stored = ctx.resumed && ctx.stored && ctx.stored.w ? ctx.stored : null;
+  if (stored && Number(seq) > 0) {
+    const landed = Object.keys(stored.w).some(function(f) {
+      const x = meta.f[f];
+      return !!x && Number(x.t) === at && Number(x.q) === Number(seq);
+    });
+    if (landed) {
+      if (!ctx.editLogged) {
+        try {
+          writeEditLogForOp(ss, sheetName, staffName, dateStr, oldRow, stored, stored.w, Object.keys(stored.w), stored.cf || null, stored.cff || null, op.opId, sender);
+          ctx.markEditLogged();
+        } catch (e) {
+          console.warn('EditLog failed:', e);
+          return { result: 'error', reason: 'editlog_failed' };
+        }
+        SpreadsheetApp.flush();
+      }
+      return { result: 'applied', reason: stored.r, corrected: stored.c };
+    }
+  }
+
   const state = rowState(oldRow, meta, seq);
   // 操作時刻が削除より前の操作は以後すべて skipped（3.6-2）
   const del = fieldInfo(meta, 'deleted');
@@ -1084,11 +1179,17 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, ctx) {
   const fields = Object.keys(writes);
   // 変更前の値（3.12-1）: 書き換える項目の今の値。OpLog「受付」に残し、EditLog はこれと書いた値から作る。
   // 当て直しのときは、最初に受け付けたときの変更前の値が返る
+  // 【コードレビュー1-1】書く値（w）・理由（r）・時計補正（cf / c）も一緒に残し、当て直しで EditLog を作れるようにする
   const beforeNow = { exists: exists, v: {} };
   fields.forEach(function(f) {
     const v = oldRow[COL[f] - 1];
     beforeNow.v[f] = TIME_FIELDS.indexOf(f) !== -1 ? (formatTimeCell(v) || '') : (v instanceof Date ? v.toISOString() : v);
   });
+  if (fields.length > 0) {
+    beforeNow.w = writes;
+    if (plan.reason) beforeNow.r = plan.reason;
+    if (clockFix) { beforeNow.cf = clockFix; beforeNow.cff = opData.field; beforeNow.c = corrected; }
+  }
   const before = ctx.accept(beforeNow) || beforeNow;
   const result = fields.length > 0 ? 'applied' : 'skipped';
   if (result === 'skipped') return { result: 'skipped', reason: plan.reason || 'nothing_to_write' };
@@ -1127,23 +1228,36 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, ctx) {
   if (plan.clearAllMarks) newRow[COL.selfEdited - 1] = '';
   const targetRow = exists ? found.rowIndex : Math.max(sheet.getLastRow() + 1, 2);
   // 1日分の1〜17列を1回で書き、同じ手順で EditLog も書いてから確定させる（3.9-2・3.10-1・3.11-4）。
-  // EditLog の各行には opId を入れる。「受付」のまま止まった操作を当て直すときは、直近500行にその opId があれば書かない。
+  // EditLog の各行には opId を入れる。
   sheet.getRange(targetRow, 1, 1, SHEET_COLS).setValues([newRow]);
   if (!ctx.editLogged) {
     // ===== 修正履歴（EditLog）: 変更前の値（OpLog「受付」に残したもの）と書いた値を比べ、変わった項目だけ記録 =====
-    const beforeRow = newRow.slice();
-    Object.keys(before.v || {}).forEach(function(f) { beforeRow[COL[f] - 1] = before.v[f]; });
-    if (before.exists) {
-      try { logEditIfChanged(ss, sheetName, beforeRow, newRow, fields, op.opId); } catch (e) { console.warn('EditLog failed:', e); }
+    // 【コードレビュー1-1】EditLog が書けなかったときは「EditLog 済み」の印を付けず、「受付」のまま残す（error）。
+    // 再送で、書けている勤怠の行はそのままに EditLog だけ作り直す。
+    try {
+      writeEditLogForOp(ss, sheetName, staffName, dateStr, newRow, before, writes, fields, clockFix, opData.field, op.opId, sender);
+      ctx.markEditLogged();
+    } catch (e) {
+      console.warn('EditLog failed:', e);
+      SpreadsheetApp.flush();
+      return { result: 'error', reason: 'editlog_failed', wrote: true };
     }
-    // 時計補正の記録は、実際に時刻を書いたときだけ
-    if (clockFix && fields.indexOf(opData.field) !== -1 && (before.v || {})[opData.field] !== writes[opData.field]) {
-      appendEditLogLine(ss, staffName, dateStr, '時計補正 ' + clockFix.from + ' → ' + clockFix.to + '（送信元 ' + (sender || '不明') + '）', op.opId);
-    }
-    ctx.markEditLogged();
   }
   SpreadsheetApp.flush();
-  return { result: 'applied', reason: plan.reason };
+  return { result: 'applied', reason: plan.reason, corrected: corrected, wrote: true };
+}
+
+// 操作1つ分の EditLog（変更前の値 before.v → 書いた値 after）。失敗したら例外を投げる（呼ぶ側で印を付けない）
+function writeEditLogForOp(ss, sheetName, staffName, dateStr, baseRow, before, after, fields, clockFix, fixField, opId, sender) {
+  const beforeRow = baseRow.slice();
+  const afterRow = baseRow.slice();
+  Object.keys(before.v || {}).forEach(function(f) { beforeRow[COL[f] - 1] = before.v[f]; });
+  fields.forEach(function(f) { afterRow[COL[f] - 1] = after[f]; });
+  if (before.exists) logEditIfChanged(ss, sheetName, beforeRow, afterRow, fields, opId);
+  // 時計補正の記録は、実際に時刻を書いたときだけ
+  if (clockFix && fixField && fields.indexOf(fixField) !== -1 && (before.v || {})[fixField] !== after[fixField]) {
+    appendEditLogLine(ss, staffName, dateStr, '時計補正 ' + clockFix.from + ' → ' + clockFix.to + '（送信元 ' + (sender || '不明') + '）', opId);
+  }
 }
 
 // 行の今の状態（ルール判断用）
@@ -1401,25 +1515,53 @@ function recentOpLogSheetNames(nowMs) {
   return names;
 }
 
-// { map: { opId: {result, reason, normAt, seq, ref:{sheet,row}} } }
+// { map: { opId: {result, reason, normAt, seq, ref:{sheet,row}, before, editLogged} }, lastRows: { シート名: 読んだ最後の行 } }
+function opLogEntryFromRow(r, name, rowNo) {
+  let before = null;
+  try { before = r[11] ? JSON.parse(String(r[11])) : null; } catch (e) { before = null; }
+  return { result: String(r[1] || ''), reason: String(r[2] || ''), normAt: Date.parse(String(r[9] || '')), seq: Number(r[10]) || 0, ref: { sheet: name, row: rowNo },
+    before: before, editLogged: String(r[12] || '') === '1' };
+}
+function readOpLogRowsInto(sh, name, fromRow, toRow, map) {
+  if (toRow < fromRow) return;
+  const values = sh.getRange(fromRow, 1, toRow - fromRow + 1, OPLOG_COLS).getValues();
+  values.forEach(function(r, i) {
+    const id = String(r[0] || '');
+    if (!id || map[id]) return; // 同じ opId は最初の行
+    map[id] = opLogEntryFromRow(r, name, fromRow + i);
+  });
+}
 function loadOpLog(ss) {
-  const out = { map: {} };
+  const out = { map: {}, lastRows: {} };
   // 古い月から読む（同じ opId は最初の行）
   recentOpLogSheetNames(Date.now()).reverse().forEach(function(name) {
     const sh = ss.getSheetByName(name);
-    if (!sh || sh.getLastRow() < 2) return;
-    const values = sh.getRange(2, 1, sh.getLastRow() - 1, OPLOG_COLS).getValues();
-    values.forEach(function(r, i) {
-      const id = String(r[0] || '');
-      const seq = Number(r[10]) || 0;
-      if (!id || out.map[id]) return;
-      let before = null;
-      try { before = r[11] ? JSON.parse(String(r[11])) : null; } catch (e) { before = null; }
-      out.map[id] = { result: String(r[1] || ''), reason: String(r[2] || ''), normAt: Date.parse(String(r[9] || '')), seq: seq, ref: { sheet: name, row: i + 2 },
-        before: before, editLogged: String(r[12] || '') === '1' };
-    });
+    if (!sh) return;
+    const last = sh.getLastRow();
+    out.lastRows[name] = last;
+    readOpLogRowsInto(sh, name, 2, last, out.map);
   });
   return out;
+}
+// ロックを取るたびに呼ぶ（コードレビュー1-11）: 初回は全部読み、2回目からは他の実行が足した行と、この opId の行だけ読み直す
+function refreshOpLog(ss, state, opId) {
+  if (!state.loaded) {
+    const l = loadOpLog(ss);
+    state.map = l.map; state.lastRows = l.lastRows; state.loaded = true;
+    return;
+  }
+  recentOpLogSheetNames(Date.now()).reverse().forEach(function(name) {
+    const sh = ss.getSheetByName(name);
+    if (!sh) return;
+    const last = sh.getLastRow();
+    readOpLogRowsInto(sh, name, Math.max(state.lastRows[name] || 1, 1) + 1, last, state.map);
+    state.lastRows[name] = last;
+  });
+  const e = state.map[opId];
+  if (e && e.ref) {
+    const sh = ss.getSheetByName(e.ref.sheet);
+    if (sh) state.map[opId] = opLogEntryFromRow(sh.getRange(e.ref.row, 1, 1, OPLOG_COLS).getValues()[0], e.ref.sheet, e.ref.row);
+  }
 }
 
 // 受付順の番号（通し番号）を1つ進める。ScriptProperties に置き、打刻と同じロックの中で呼ぶ（3.11-2）。
@@ -1576,8 +1718,17 @@ function getSettings(ss) {
       });
       settings.confirmations = map;
       settings.confirmationOps = ops;
+    } else {
+      settings.confirmations = {};
+      settings.confirmationOps = {};
     }
-  } catch (e) { /* 確認シートが無い場合は無視 */ }
+    // 【コードレビュー1-2】本人確認を読めたことの印。エクセル出力はこの印が無ければ止める（全員「未」で出さない）
+    settings.confirmationsOk = true;
+  } catch (e) {
+    console.warn('Confirmations の読み取りに失敗', e);
+    settings.confirmationsOk = false;
+    settings.confirmationsError = String(e && e.message ? e.message : e);
+  }
   return settings;
 }
 
@@ -1818,7 +1969,7 @@ function fmtDateCell(v, tz) {
 
 /**
  * 【戻すとき用・6章／3.6-11】反映前に控えたスプレッドシート（コピー）と今のシートを行ごとに比べ、
- * 「控えと今で、どれかの項目が変わった行」をすべてログに一覧表示する（何も書き換えない）。
+ * 「控えと今で、どれかの項目が変わった行」と「今だけにある行（反映後に増えた行）」をすべてログに一覧表示する（何も書き換えない）。
  * EditLog・OpLog と照らして、必要な行だけ手で戻すために使う。
  * 使い方: スクリプトプロパティ BACKUP_SS_ID に控えのIDを入れて、エディタからこの関数を実行 →「実行ログ」を見る。
  */
@@ -1847,7 +1998,130 @@ function listRowsChangedSinceBackup() {
       if (diffs.length) out.push(name + ' ' + dateStr + ': ' + diffs.join(' / '));
     });
   });
+  // 【コードレビュー1-5】今だけにあるシート・行（反映後に増えた記録）も一覧に出す
+  cur.getSheets().forEach(function(cs) {
+    const name = cs.getName();
+    const nm = name.match(/^(.+)_\d{6}$/);
+    if (!nm || nm[1] === OPLOG_SHEET_NAME) return;
+    const bs = bak.getSheetByName(name);
+    const bakDates = {};
+    if (bs) readSheetRows(bs).forEach(function(br) { const d = cellToDateStr(br[0], tz); if (d) bakDates[d] = true; });
+    readSheetRows(cs).forEach(function(cr) {
+      const dateStr = cellToDateStr(cr[0], tz);
+      if (!dateStr || bakDates[dateStr]) return;
+      const b = rowToRecord(cr, nm[1], dateStr, tz);
+      const vals = fields.filter(function(f) { return b[f] !== null && b[f] !== '' && b[f] !== false; })
+        .map(function(f) { return f + '「' + b[f] + '」'; });
+      out.push(name + ' ' + dateStr + ': ' + (bs ? '行が増えています' : 'シートごと増えています') + (vals.length ? '（' + vals.join(' / ') + '）' : ''));
+    });
+  });
   out.forEach(function(l) { console.log(l); });
   console.log('合計 ' + out.length + ' 件');
   return out;
+}
+
+/**
+ * 【コードレビュー1-10・反映手順書 5】本番の Apps Script で1回だけ実行する: この勤怠ファイルの ID と、
+ * 「有給」フォルダの「年次有給休暇管理簿」の ID を、スクリプト プロパティ PROD_TIMECARD_SS_IDS / PROD_LEAVE_BOOK_IDS に登録する。
+ * （コードを書き換えずに「試験のときに本番を開かない仕組み」を使えるようにする）
+ * 試験用のコピー（MODE=test、または名前に「コピー」「控え」「試験」を含む）では登録しない。
+ */
+function registerProductionIds() {
+  const props = PropertiesService.getScriptProperties();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const name = ss.getName();
+  if (props.getProperty('MODE') === 'test' || /コピー|控え|試験|test/i.test(name)) {
+    console.log('NG: 試験用のファイル（' + name + '）では登録しません。本番の勤怠スプレッドシートの Apps Script で実行してください');
+    return null;
+  }
+  const books = [];
+  const it = DriveApp.getFolderById(LEAVE_FOLDER_ID).getFilesByType(MimeType.GOOGLE_SHEETS);
+  while (it.hasNext()) {
+    const f = it.next();
+    if (String(f.getName()).indexOf(LEAVE_FILE_NAME_PREFIX) === 0) books.push(f.getId());
+  }
+  props.setProperty('PROD_TIMECARD_SS_IDS', ss.getId());
+  props.setProperty('PROD_LEAVE_BOOK_IDS', books.join(','));
+  TEST_MODE_MEMO = null;
+  console.log('OK: 本番の勤怠ファイル「' + name + '」と、有給管理簿 ' + books.length + ' 件を登録しました');
+  return { timecard: ss.getId(), leaveBooks: books };
+}
+
+/**
+ * 【コードレビュー1-10・反映手順書 0-3】本番に出す前の試験（コピーしたスプレッドシートの Apps Script で実行）。
+ * 実際の GAS で次を確かめ、実行ログに「合格／不合格／目で確認」を1行ずつ出す。最後の行が「全体: 合格」なら本番に進んでよい。
+ *  1. 10月分の高橋さん = 8日・2026/11/01（chihiro 確認済みの正解）
+ *  2. 9月分の小田さん（10/3 付与を含まない値）・4月分（前年度ファイルへの切り替わり）を表示（chihiro の手直しの値と目で照らす）
+ *  3. 有給の計算中に別の計算が来たら「少し待って」になり、他人の印を消さない。終わったら計算用ファイルは _keep だけ
+ *  4. 打刻 → 同じ opId の再送は二重にならない → 完全取消（試験用の名前「試験_リリース確認」で行い、最後にシートを消す）
+ * 本番のファイルでは動かない（試験モードでなければ止まる）。
+ */
+function runReleaseCheck() {
+  const lines = [];
+  let ok = true;
+  const check = function(cond, msg) { lines.push((cond ? '合格: ' : '不合格: ') + msg); if (!cond) ok = false; };
+  const show = function(msg) { lines.push('目で確認: ' + msg); };
+  const finish = function() {
+    lines.push(ok ? '全体: 合格' : '全体: 不合格（本番に進まないでください）');
+    lines.forEach(function(l) { console.log(l); });
+    return { ok: ok, lines: lines };
+  };
+  if (!isTestMode()) { ok = false; lines.push('不合格: 試験モードではありません（MODE=test を登録した、コピーのスプレッドシートで実行してください）'); return finish(); }
+  const cache = CacheService.getScriptCache();
+  const findBy = function(info, prefix) {
+    const keys = Object.keys(info || {}).filter(function(k) { return normalizeNameForMatch(k).indexOf(normalizeNameForMatch(prefix)) === 0; });
+    return keys.length === 1 ? { name: keys[0], v: info[keys[0]] } : null;
+  };
+  try {
+    // 1. 10月分 高橋さん
+    cache.remove('leave_result_202610');
+    const oct = getLeaveInfoAtMonthEnd('2026-10');
+    const t = oct && oct.found ? findBy(oct.leaveInfo, '高橋') : null;
+    check(!!t && Number(t.v.remainingDays) === 8 && t.v.nextGrantDate === '2026/11/01',
+      '10月分 高橋さん = ' + (t ? t.v.remainingDays + '日・' + t.v.nextGrantDate : '見つからない（' + (oct && (oct.reason || oct.message)) + '）') + '（正解 8日・2026/11/01）');
+    // 2. 9月分 小田さん・4月分
+    cache.remove('leave_result_202609');
+    const sep = getLeaveInfoAtMonthEnd('2026-09');
+    const o = sep && sep.found ? findBy(sep.leaveInfo, '小田') : null;
+    check(!!o, '9月分を計算できた');
+    if (o) show('9月分 小田さん = ' + o.v.remainingDays + '日・' + o.v.nextGrantDate + '（10/3 付与を含まない、chihiro の手直しの値と同じか）');
+    cache.remove('leave_result_202604');
+    const apr = getLeaveInfoAtMonthEnd('2026-04');
+    check(!!(apr && apr.found), '2026年4月分を計算できた（' + (apr && (apr.fileName || apr.reason)) + '）');
+    if (apr && apr.found) show('2026年4月分は「' + apr.fileName + '」で計算（前年度のファイルか）。誰か1人を管理簿と手で照らす');
+    // 3. 同時に計算が来たとき
+    const props = PropertiesService.getScriptProperties();
+    const foreign = JSON.stringify({ runId: 'release-check-other', until: Date.now() + 60000 });
+    props.setProperty(LEAVE_CALC_RUNNING_PROP, foreign);
+    cache.remove('leave_result_202610');
+    const busy = getLeaveInfoAtMonthEnd('2026-10');
+    check(busy && busy.status === 'busy', '計算中に来た計算は「少し待って」になる');
+    check(props.getProperty(LEAVE_CALC_RUNNING_PROP) === foreign, '他の計算の印を消さない');
+    props.deleteProperty(LEAVE_CALC_RUNNING_PROP);
+    const calcId = props.getProperty(LEAVE_CALC_SS_PROP);
+    const calcSheets = calcId ? openSpreadsheetChecked(calcId, '有給月末計算用').getSheets().map(function(s) { return s.getName(); }) : [];
+    check(calcSheets.length === 1 && calcSheets[0] === LEAVE_CALC_KEEP_SHEET, '計算用ファイルには _keep だけが残る（' + calcSheets.join(',') + '）');
+    // 4. 打刻の往復
+    const ss = getTimecardSs();
+    const staff = '試験_リリース確認';
+    const tz = Session.getScriptTimeZone();
+    const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    const id = 'release-' + Utilities.getUuid();
+    const nowIso = new Date().toISOString();
+    const send = function(ops) { return JSON.parse(handleOps(ss, { action: 'ops', clientVersion: MIN_CLIENT_VERSION, sender: '試験', sentAt: Date.now(), ops: ops }).getContent()); };
+    const p = { opId: id + '-in', type: 'punch', staffName: staff, date: today, at: nowIso, offsetAtOp: 0, data: { field: 'clockIn', time: Utilities.formatDate(new Date(), tz, 'HH:mm:ss'), attrs: {} } };
+    const r1 = send([p]);
+    check(r1.status === 'ok' && r1.results[p.opId].result === 'applied', '打刻が書ける');
+    const r2 = send([p]);
+    check(r2.results[p.opId].duplicate === true, '同じ opId の再送は二重にならない');
+    const d = { opId: id + '-del', type: 'delete', staffName: staff, date: today, at: new Date(Date.now() + 1000).toISOString(), offsetAtOp: 0, data: {} };
+    const r3 = send([d]);
+    const rec = getOneRecord(ss, staff, today).record;
+    check(r3.results[d.opId].result === 'applied' && rec && rec.deleted === true, '完全取消が書ける');
+    const sh = ss.getSheetByName(staff + '_' + today.substring(0, 4) + today.substring(5, 7));
+    if (sh) ss.deleteSheet(sh);
+  } catch (e) {
+    check(false, '途中でエラー: ' + (e && e.message ? e.message : e));
+  }
+  return finish();
 }

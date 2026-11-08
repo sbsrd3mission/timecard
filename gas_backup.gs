@@ -149,7 +149,11 @@ function doGet(e) {
     const log = loadOpLog(ss).map;
     const results = {};
     // 「受付」のまま（途中で止まった）は未完了なので返さない（端末は再送する）
-    ids.forEach(function(id) { if (log[id] && log[id].result !== OPLOG_ACCEPTED) results[id] = { result: log[id].result, reason: log[id].reason }; });
+    ids.forEach(function(id) {
+      if (!log[id] || log[id].result === OPLOG_ACCEPTED) return;
+      results[id] = { result: log[id].result, reason: log[id].reason };
+      if (log[id].before && log[id].before.c) results[id].corrected = log[id].before.c; // 直した打刻の時刻（コードレビュー1-9）
+    });
     return createJsonResponse({ status: 'ok', results: results, generation: Number(getCacheGeneration(true)) || 0 });
   } else if (action === 'getSettings') {
     const settings = getSettings(ss);

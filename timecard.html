@@ -147,6 +147,33 @@
         const DEVICE_REPORT_FRESH_MS = 10 * 60 * 1000;
         // 端末の知らせ: 件数が変わったとき、または前の知らせからこれだけ経ったとき
         const DEVICE_REPORT_INTERVAL_MS = 3 * 60 * 1000;
+        // 端末の表示名（コードレビュー1-8）: 名前の無い端末は ID で示す
+        const deviceLabel = (d) => d && d.name ? d.name : `名前なし（ID ${String(d && d.id || '').slice(0, 12)}）`;
+        const formatAge = (ms) => { const m = Math.round(Number(ms) / 60000); return m < 60 * 24 ? `${m}分` : `${Math.round(m / 60 / 24)}日`; };
+        // 当てられなかった・受け付けられなかった操作の中身（コードレビュー1-4）: 管理者が何を入れ直すか分かるように書く
+        const OP_FIELD_LABELS = { clockIn: '出勤', breakStart: '中抜け開始', breakEnd: '中抜け終了', clockOut: '退勤', meal: '賄い', transport: '交通費', remarks: '備考', additionalBreakMins: '休憩分数', isPaidLeave: '有給', deleted: '削除' };
+        const fmtOpValue = (f, v) => {
+            if (v === null || v === undefined || v === '') return 'なし';
+            if (f === 'meal' || f === 'isPaidLeave' || f === 'deleted') return v ? 'あり' : 'なし';
+            if (f === 'additionalBreakMins') return `${v}分`;
+            if (f === 'transport') return `${v}円`;
+            if (['clockIn', 'breakStart', 'breakEnd', 'clockOut'].includes(f)) return String(v).slice(0, 5);
+            return String(v);
+        };
+        const describeOp = (op) => {
+            if (!op || typeof op !== 'object') return '';
+            const d = op.data || {};
+            const kv = (obj) => Object.keys(obj || {}).filter(f => OP_FIELD_LABELS[f]).map(f => `${OP_FIELD_LABELS[f]}=${fmtOpValue(f, obj[f])}`);
+            let body = '';
+            if (op.type === 'punch') body = ['打刻', d.field ? `${OP_FIELD_LABELS[d.field] || d.field} ${fmtOpValue(d.field, d.time)}` : '情報のみ'].concat(kv(d.attrs)).join(' ');
+            else if (op.type === 'edit') body = ['修正'].concat(kv(d.fields)).join(' ');
+            else if (op.type === 'delete') body = '完全取消';
+            else if (op.type === 'confirm') body = `本人確認 ${d.yearMonth || ''}`;
+            else if (op.type === 'legacy') body = ['古い版の未送信'].concat(kv(d)).join(' ');
+            else body = String(op.type || '');
+            const at = op.at ? new Date(op.at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }) : '';
+            return body + (at ? `（操作 ${at}）` : '');
+        };
         const getClockOffset = () => { const v = localStorage.getItem(CLOCK_OFFSET_KEY); const n = v === null ? NaN : Number(v); return isFinite(n) ? n : null; };
         // 比べる時刻（GAS の normalizeOpTime と同じ）
         const opCompareTime = (op) => {
@@ -506,6 +533,23 @@
                 });
             };
 
+            // 【コードレビュー1-9】サーバーが打刻の時刻（と日付）を直したとき（時計のずれ2分超）、画面の記録も直した値にする
+            const applyServerCorrection = (op, c) => {
+                if (!op || !c || !c.field || !c.date || !c.time) return;
+                const fromId = `${op.staffName}_${op.date}`;
+                const toId = `${op.staffName}_${c.date}`;
+                const sentTime = op.data && op.data.time;
+                setTimeRecords(prev => {
+                    let next = prev;
+                    if (fromId !== toId) {
+                        next = next.map(r => (r.id === fromId && r[c.field] === sentTime) ? { ...r, [c.field]: null } : r);
+                    }
+                    const cur = next.find(r => r.id === toId);
+                    const updated = cur ? { ...cur, [c.field]: c.time } : { id: toId, staffName: op.staffName, date: c.date, [c.field]: c.time, meal: false, remarks: '', isPaidLeave: false };
+                    return [...next.filter(r => r.id !== toId), updated];
+                });
+            };
+
             // 操作を未送信リストに入れて、すぐ送る
             const enqueueOps = (ops) => {
                 if (!ops || ops.length === 0) return;
@@ -571,11 +615,16 @@
                                         const r = data.results[id] && data.results[id].result;
                                         if (r === 'applied' || r === 'skipped') done.add(id);
                                         noteLegacyResult(batch.find(o => o.opId === id), data.results[id]);
+                                        if (data.results[id] && data.results[id].corrected) applyServerCorrection(batch.find(o => o.opId === id), data.results[id].corrected);
                                         if (r === 'invalid') {
                                             // 何度送っても受け付けられない操作は控えに移して外す
                                             const dead = safeParseJSON(localStorage.getItem('timecard_op_dead'), []);
                                             const op = batch.find(o => o.opId === id);
-                                            if (op) { dead.push({ ...op, reason: data.results[id].reason || '' }); localStorage.setItem('timecard_op_dead', JSON.stringify(dead.slice(-100))); }
+                                            if (op) {
+                                                dead.push({ ...op, reason: data.results[id].reason || '' }); localStorage.setItem('timecard_op_dead', JSON.stringify(dead.slice(-100)));
+                                                // 管理画面の一覧にも中身付きで出す（コードレビュー1-4）
+                                                addAttentionItem(op, 'invalid', 'サーバーが受け付けませんでした: ' + (data.results[id].reason || '理由不明'));
+                                            }
                                             done.add(id);
                                         }
                                     });
@@ -608,9 +657,14 @@
                 if (!op || !res || !res.reason || res.duplicate) return;
                 if (op.type !== 'legacy' && !(res.result === 'skipped' && ATTENTION_REASONS[res.reason])) return;
                 if (op.type !== 'legacy') res = { ...res, reason: ATTENTION_REASONS[res.reason] + '（' + ({ punch: '打刻', edit: '修正', 'delete': '完全取消', confirm: '本人確認' }[op.type] || op.type) + '）' };
+                addAttentionItem(op, res.result, String(res.reason));
+            };
+            // 一覧に足す（コードレビュー1-4）: 名前・日付・理由に加えて、操作の中身（op）をそのまま残す（「未送信を書き出す」にも入る）
+            const addAttentionItem = (op, result, reason) => {
                 const list = safeParseJSON(localStorage.getItem('timecard_legacy_unmigrated'), []);
                 if (list.some(x => x.opId === op.opId)) return;
-                list.push({ opId: op.opId, staffName: op.staffName, date: op.date, result: res.result, reason: String(res.reason) });
+                const { sentAt, attempts, ...content } = op;
+                list.push({ opId: op.opId, staffName: op.staffName, date: op.date, result, reason, op: content });
                 localStorage.setItem('timecard_legacy_unmigrated', JSON.stringify(list));
             };
             const checkOpStatus = async () => {
@@ -624,7 +678,12 @@
                         if (!data || data.status !== 'ok' || !data.results) continue;
                         noteGeneration(data.generation);
                         const done = new Set(Object.keys(data.results).filter(id => ['applied', 'skipped', 'invalid'].includes(data.results[id] && data.results[id].result)));
-                        done.forEach(id => noteLegacyResult(sentBefore.find(o => o.opId === id), data.results[id]));
+                        done.forEach(id => {
+                            noteLegacyResult(sentBefore.find(o => o.opId === id), data.results[id]);
+                            if (data.results[id].corrected) applyServerCorrection(sentBefore.find(o => o.opId === id), data.results[id].corrected);
+                            const op = sentBefore.find(o => o.opId === id);
+                            if (op && data.results[id].result === 'invalid') addAttentionItem(op, 'invalid', 'サーバーが受け付けませんでした: ' + (data.results[id].reason || '理由不明'));
+                        });
                         if (done.size > 0) updateOpQueue(q => q.filter(o => !done.has(o.opId)));
                     } catch (e) { /* 次の再送で確かめる */ }
                 }
@@ -1396,6 +1455,26 @@
         }) => {
             // この端末の名前（「店舗PC」「タブレット」。3.11-5）: 1回だけ付ける
             const [deviceNameInput, setDeviceNameInput] = useState(() => getDeviceName());
+            // 知っている端末の一覧（コードレビュー1-8）
+            const [knownDevices, setKnownDevices] = useState(null);
+            const loadKnownDevices = async () => {
+                if (!gasUrl) { setKnownDevices({ error: 'GAS URL が未設定です' }); return; }
+                try {
+                    const r = await fetch(gasUrl + '?action=deviceStatus&t=' + Date.now(), { method: 'GET', cache: 'no-store' });
+                    const ds = await r.json();
+                    if (!ds || ds.status !== 'ok' || !Array.isArray(ds.devices)) throw new Error('bad');
+                    setKnownDevices({ list: ds.devices.slice().sort((a, b) => Number(a.ageMs) - Number(b.ageMs)) });
+                } catch (e) { setKnownDevices({ error: '端末の一覧を取得できませんでした' }); }
+            };
+            const removeKnownDevice = async (d) => {
+                if (!window.confirm(`「${deviceLabel(d)}」を一覧から消しますか？\n（もう使わない端末だけ消してください。使っている端末は、次に開いたときにまた一覧に出ます）`)) return;
+                try {
+                    const r = await fetch(gasUrl + '?action=removeDevice&id=' + encodeURIComponent(d.id) + '&t=' + Date.now(), { method: 'GET', cache: 'no-store' });
+                    const res = await r.json();
+                    if (!res || res.status !== 'ok') throw new Error('bad');
+                } catch (e) { alert('消せませんでした。通信状態を確かめてください。'); return; }
+                loadKnownDevices();
+            };
             const [targetMonth, setTargetMonth] = useState(() => {
                 const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
             });
@@ -1540,19 +1619,20 @@
                     try {
                         const ds = await fetchJson(gasUrl + '?action=deviceStatus&t=' + Date.now());
                         if (!ds || ds.status !== 'ok' || !Array.isArray(ds.devices)) throw new Error('no device status');
-                        const registered = ds.devices.filter(d => d && d.name);
-                        if (registered.length === 0) problems.push('登録端末がありません（管理画面で「この端末の名前」を付けてください）');
+                        // 【コードレビュー1-8】30日以内に知らせのあった端末は、名前が無くてもすべて確かめる（名前の付け忘れで漏れない）
+                        const registered = ds.devices.filter(d => d && d.id);
+                        if (registered.length === 0) problems.push('知っている端末がありません（管理画面で「この端末の名前」を付けてください）');
                         registered.forEach(d => {
                             const fresh = Number(d.ageMs) <= DEVICE_REPORT_FRESH_MS;
-                            if (!fresh) problems.push(`${d.name}: 確認できませんでした（最後の知らせから${Math.round(Number(d.ageMs) / 60000)}分）`);
-                            else if (Number(d.pending) > 0) problems.push(`${d.name}: 未送信が${d.pending}件あります`);
+                            if (!fresh) problems.push(`${deviceLabel(d)}: 確認できませんでした（最後の知らせから${formatAge(d.ageMs)}）`);
+                            else if (Number(d.pending) > 0) problems.push(`${deviceLabel(d)}: 未送信が${d.pending}件あります`);
                         });
-                        list = registered.map(d => `・${d.name}: 未送信 ${d.pending}件（${Math.round(Number(d.ageMs) / 60000)}分前の知らせ）`).join('\n');
+                        list = registered.map(d => `・${deviceLabel(d)}: 未送信 ${d.pending}件（${formatAge(d.ageMs)}前の知らせ）`).join('\n');
                     } catch (e) {
                         problems = ['端末の未送信を確認できませんでした（通信エラー）'];
                     }
                     if (problems.length > 0) {
-                        const ok = window.confirm(`⚠️ 出力前の確認: 未送信を確かめられない端末があります。\n\n${problems.join('\n')}\n${list ? '\n' + list + '\n' : ''}\nその端末を開いて、送信されるのを待ってから出力してください。\n\n［キャンセル］出力をやめる（おすすめ）\n［OK］分かったうえで出力を続ける（Excel に注意書きが入ります）`);
+                        const ok = window.confirm(`⚠️ 出力前の確認: 未送信を確かめられない端末があります。\n\n${problems.join('\n')}\n${list ? '\n' + list + '\n' : ''}\nその端末を開いて、送信されるのを待ってから出力してください。\n（もう使わない端末は、管理画面の「知っている端末」から消せます）\n\n［キャンセル］出力をやめる（おすすめ）\n［OK］分かったうえで出力を続ける（Excel に注意書きが入ります）`);
                         if (!ok) return null;
                         deviceWarning = '出力時に未送信を確認できなかった端末あり: ' + problems.join(' / ');
                     }
@@ -1574,11 +1654,10 @@
                     }
                     return { status: 'busy', message: '有給の計算が混み合っています' };
                 };
-                const [monthRes, settingsRes, leaveRes] = await Promise.allSettled([
-                    fetchMonthData(),
-                    fetchJson(gasUrl + '?action=getSettings&t=' + Date.now()),
-                    withLeave ? fetchLeave() : Promise.resolve(null),
-                ]);
+                // 【コードレビュー1-3】GAS への取得は同時に投げず、1件ずつ順番に（勤怠 → 設定 → 有給）
+                const settle = async (fn) => { try { return { status: 'fulfilled', value: await fn() }; } catch (e) { return { status: 'rejected', reason: e }; } };
+                const monthRes = await settle(fetchMonthData);
+                const settingsRes = await settle(() => fetchJson(gasUrl + '?action=getSettings&t=' + Date.now()));
 
                 const stopReasons = [];
                 const md = monthRes.status === 'fulfilled' ? monthRes.value : null;
@@ -1591,17 +1670,22 @@
                 const cloudStaff = sd && sd.status === 'ok' && sd.settings && Array.isArray(sd.settings.staffList) ? sd.settings.staffList : null;
                 if (!cloudStaff || cloudStaff.length === 0) {
                     stopReasons.push('・スタッフ名簿・本人確認を取得できませんでした' + (settingsRes.status === 'rejected' ? `（${settingsRes.reason?.message || '通信エラー'}）` : ''));
+                } else if (sd.settings.confirmationsOk !== true || !sd.settings.confirmations || typeof sd.settings.confirmations !== 'object') {
+                    // 【コードレビュー1-2】本人確認が読めないときは全員「未」で出さずに止める（3.3-1）
+                    stopReasons.push('・本人確認（確認済みの印）を取得できませんでした' + (sd.settings.confirmationsError ? `（${sd.settings.confirmationsError}）` : ''));
                 }
                 if (stopReasons.length > 0) {
                     alert('⚠️ エクセル出力を中止しました\n\n' + stopReasons.join('\n') + '\n\n通信状態を確かめて、もう一度押してください。');
                     return null;
                 }
+                // 有給は最後に（勤怠・設定が取れたときだけ）。有給だけ取れないときは出力を続け「取得できず」（3.3-1）
+                const leaveRes = await settle(() => withLeave ? fetchLeave() : Promise.resolve(null));
 
                 // 出力に使うのは取り直した結果だけ（3.5-10）
                 const exportStaff = cloudStaff
                     .filter(s => (typeof s === 'string' && s.trim()) || (s && typeof s.name === 'string' && s.name.trim()))
                     .map(s => typeof s === 'string' ? { name: s, isOutsourced: false } : s);
-                const exportConfirmations = (sd.settings.confirmations && typeof sd.settings.confirmations === 'object') ? sd.settings.confirmations : {};
+                const exportConfirmations = sd.settings.confirmations;
                 const exportRecords = md.records.filter(r => r && typeof r.id === 'string' && !r.deleted && String(r.date || '').startsWith(ym));
                 const recordById = {};
                 exportRecords.forEach(r => { recordById[r.id] = r; });
@@ -2411,14 +2495,30 @@
                             <button id="device-name-save" onClick={() => { const v = deviceNameInput.trim(); if (!v) return; localStorage.setItem('timecard_device_name', v); if (reportDeviceStatus) reportDeviceStatus(true); alert(`この端末の名前を「${v}」にしました。`); }} className="px-2 py-1 bg-white border border-current rounded font-bold">保存</button>
                             {!getDeviceName() && <span className="text-red-600 font-bold">未設定（出力前の未送信の確認に使います）</span>}
                         </div>
+                        {/* 知っている端末（30日以内に知らせのあった端末。コードレビュー1-8）: もう使わない端末の ID を消せる */}
+                        <div id="known-devices-panel" className="text-xs px-3 py-2 rounded-lg mb-2 border bg-white border-primary/20 text-primary">
+                            <button id="known-devices-load" onClick={loadKnownDevices} className="px-2 py-1 bg-white border border-current rounded font-bold">知っている端末を見る</button>
+                            {knownDevices && (knownDevices.error
+                                ? <span className="ml-2 text-red-600">{knownDevices.error}</span>
+                                : <ul className="mt-1 ml-1">
+                                    {knownDevices.list.length === 0 && <li>まだありません</li>}
+                                    {knownDevices.list.map(d => (
+                                        <li key={d.id} className="known-device-row flex flex-wrap items-center gap-2 py-0.5">
+                                            <span className={d.name ? 'font-bold' : 'text-red-600 font-bold'}>{deviceLabel(d)}</span>
+                                            <span>未送信 {d.pending}件・{formatAge(d.ageMs)}前の知らせ{d.id === getDeviceId() ? '（この端末）' : ''}</span>
+                                            {d.id !== getDeviceId() && <button onClick={() => removeKnownDevice(d)} className="known-device-remove px-2 py-0.5 bg-white border border-current rounded">一覧から消す</button>}
+                                        </li>
+                                    ))}
+                                  </ul>)}
+                        </div>
                         {(() => {
                             const unmigrated = safeParseJSON(localStorage.getItem('timecard_legacy_unmigrated'), []);
                             if (!Array.isArray(unmigrated) || unmigrated.length === 0) return null;
                             return (
                                 <div id="legacy-unmigrated-panel" className="text-xs px-3 py-2 rounded-lg mb-2 border bg-amber-50 text-amber-800 border-amber-200">
-                                    <p className="font-bold">⚠ 当てられなかった未送信 {unmigrated.length}件（古い版の未送信のうち当てなかった項目や、古すぎる・新しい記録があるため当てなかった操作。確かめて修正画面から入れ直してください）</p>
+                                    <p className="font-bold">⚠ 当てられなかった未送信 {unmigrated.length}件（古い版の未送信のうち当てなかった項目や、古すぎる・新しい記録があるため当てなかった操作、サーバーが受け付けなかった操作。内容を確かめて修正画面から入れ直してください）</p>
                                     <ul className="list-disc ml-5 mt-1">
-                                        {unmigrated.map((p, i) => <li key={i}>{p.staffName} {p.date}: {p.reason}</li>)}
+                                        {unmigrated.map((p, i) => <li key={i}>{p.staffName} {p.date}: {p.reason}{p.op ? <div className="attention-op-content text-amber-900">内容: {describeOp(p.op)}</div> : null}</li>)}
                                     </ul>
                                     <button onClick={() => { if (window.confirm('一覧を消しますか？（入れ直しが終わってから押してください）')) { localStorage.setItem('timecard_legacy_unmigrated', '[]'); window.location.reload(); } }} className="mt-1 px-2 py-1 bg-white border border-current rounded">入れ直しが終わったので一覧を消す</button>
                                 </div>
@@ -2561,9 +2661,9 @@
             const handlePunch = (type, skipHealthCheck = false) => {
                 if (!selectedStaffName) return;
 
-                const now = new Date();
+                let now = new Date();
                 const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-                const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) + ':00';
+                let timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) + ':00';
                 const recordId = `${selectedStaffName}_${dateStr}`;
                 
                 let additionalBreakPromptMins = 0;
@@ -2649,6 +2749,17 @@
                     const input = window.prompt("休憩は何分でしたか？（無しは「0」）", "0");
                     if (input === null) return;
                     additionalBreakPromptMins = parseInt(input) || 0;
+                }
+
+                // 【コードレビュー1-9】退勤の時刻は、休憩分数の入力に答えた時点で取り直す（入力を待つ間に時刻が進んでも、
+                // 打刻の時刻と操作時刻（at）がずれないように）。日付が変わってしまったときは、押した時点の時刻のままにする。
+                if (type === 'out' || type === 'out_blind') {
+                    const answered = new Date();
+                    const answeredDate = `${answered.getFullYear()}-${String(answered.getMonth() + 1).padStart(2, '0')}-${String(answered.getDate()).padStart(2, '0')}`;
+                    if (answeredDate === dateStr) {
+                        now = answered;
+                        timeStr = answered.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) + ':00';
+                    }
                 }
 
                 // 【2026-11-08】送るデータ（操作）は React の更新処理の外で先に作る（3.1(1)）。

@@ -153,7 +153,7 @@ function doGet(e) {
     // 端末名と未送信の件数の知らせ（3.11-5）
     return createJsonResponse(reportDevice(e.parameter));
   } else if (action === 'deviceStatus') {
-    return createJsonResponse({ status: 'ok', devices: listRecentDevices(), serverTimeMs: Date.now() });
+    return createJsonResponse({ status: 'ok', devices: listRegisteredDevices(), serverTimeMs: Date.now() });
   } else if (action === 'ping') {
     return createJsonResponse({ status: 'ok', message: 'pong', timestamp: new Date().toISOString() });
   } else if (action === 'getLeaveInfo') {
@@ -567,10 +567,13 @@ function doPost(e) {
         const logged = opLog.map[opId];
         // 同じ opId がもう一度届いたら、書き込まずに最初の結果を返す（3.6-4）
         if (logged && logged.result !== OPLOG_ACCEPTED) { results[opId] = { result: logged.result, reason: logged.reason, duplicate: true }; return; }
-        let normAt, seq, logRow;
+        let normAt, seq, logRow = null;
+        // 当て直し（3.12-1）: 「受付」に残した変更前の値と「EditLog 済み」の印を使う
+        const ctx = { resumed: !!logged, editLogged: !!(logged && logged.editLogged) };
         if (logged) {
           // 「受付」のまま残っていた（前回が途中で止まった）: 記録してある比較時刻・受付順でもう一度当てる（3.9-2）
           normAt = logged.normAt; seq = logged.seq; logRow = logged.ref;
+          ctx.accept = function(before) { return logged.before || before; };
         } else {
           // 比べる時刻と受付順は、最初に受け付けたときに決めて OpLog に残す（3.8-2・3.9-2）
           normAt = normalizeOpTime(op, serverNow);
@@ -583,14 +586,18 @@ function doPost(e) {
             results[opId] = r0;
             return;
           }
-          // ① 先に「受付」を書く
-          logRow = appendOpLogRow(ss, opLogRowValues(op, OPLOG_ACCEPTED, '', serverNow, sender, normAt, seq), serverNow);
-          opLog.map[opId] = { result: OPLOG_ACCEPTED, reason: '', normAt: normAt, seq: seq, ref: logRow };
+          // ① 書く内容を決めたら（読むだけ）、勤怠を書く前に「受付」を書く。変更前の値も一緒に残す（3.9-2・3.12-1）
+          ctx.accept = function(before) {
+            logRow = appendOpLogRow(ss, opLogRowValues(op, OPLOG_ACCEPTED, '', serverNow, sender, normAt, seq, before), serverNow);
+            opLog.map[opId] = { result: OPLOG_ACCEPTED, reason: '', normAt: normAt, seq: seq, ref: logRow, before: before };
+            return before;
+          };
         }
-        // ② 勤怠の行を書く（1日分の1〜17列を1回で）
+        // ② 勤怠の行と EditLog を書く（1日分の1〜17列を1回で）。EditLog を書いたら「EditLog 済み」の印も同じ手順で付ける
+        ctx.markEditLogged = function() { if (logRow) markOpLogEditLogged(ss, logRow); };
         let res;
         try {
-          res = applyOp(ss, op, sender, serverNow, normAt, seq, !!logged);
+          res = applyOp(ss, op, sender, serverNow, normAt, seq, ctx);
         } catch (err) {
           console.error('applyOp failed', err);
           res = { result: 'error', reason: String(err && err.message ? err.message : err) };
@@ -598,7 +605,8 @@ function doPost(e) {
         results[opId] = res;
         // ③ OpLog を「完了」にする。error（一時的な失敗）は「受付」のまま残す＝再送で同じ時刻・受付順で当て直す
         if (res.result !== 'error') {
-          finishOpLogRow(ss, logRow, res.result, res.reason);
+          if (logRow) finishOpLogRow(ss, logRow, res.result, res.reason);
+          else appendOpLogRow(ss, opLogRowValues(op, res.result, res.reason, serverNow, sender, normAt, seq), serverNow); // 書く前に決まった結果（invalid など）
           opLog.map[opId] = { result: res.result, reason: res.reason || '' };
         }
         if (res.result === 'applied') {
@@ -622,11 +630,11 @@ function doPost(e) {
   return createJsonResponse({ status: 'error', message: 'Invalid action' });
 }
 
-// ===== 端末の未送信の知らせ（3.11-5） =====
-// 各端末は同期のたびに（変わったとき・5分おき）端末名と未送信の件数を知らせる。
-// Excel 出力の前に、直近30分以内に知らせのあった全端末の件数を表示する。
+// ===== 端末の未送信の知らせ（3.11-5・3.12-4） =====
+// 各端末は同期のたびに（変わったとき・数分おき）端末名と未送信の件数を知らせる。
+// 管理画面で名前を付けた端末を「登録端末」とし、deviceStatus は登録端末すべてを「最後の知らせからの経過」付きで返す。
+// （10分以内・未送信0件かどうかはアプリが判断する）
 const DEVICE_PROP_PREFIX = 'DEV_';
-const DEVICE_RECENT_MS = 30 * 60 * 1000;
 function reportDevice(p) {
   const id = String(p.id || '').replace(/[^\w\-]/g, '').substring(0, 40);
   if (!id) return { status: 'error', message: 'id がありません' };
@@ -635,7 +643,7 @@ function reportDevice(p) {
   PropertiesService.getScriptProperties().setProperty(DEVICE_PROP_PREFIX + id, JSON.stringify(info));
   return { status: 'ok' };
 }
-function listRecentDevices() {
+function listRegisteredDevices() {
   const all = PropertiesService.getScriptProperties().getProperties();
   const now = Date.now();
   const out = [];
@@ -643,20 +651,20 @@ function listRecentDevices() {
     if (k.indexOf(DEVICE_PROP_PREFIX) !== 0) return;
     let v = null;
     try { v = JSON.parse(all[k]); } catch (e) { return; }
-    if (!v || now - Number(v.at) > DEVICE_RECENT_MS) return;
-    out.push({ id: k.substring(DEVICE_PROP_PREFIX.length), name: v.name, pending: Number(v.pending) || 0, at: new Date(Number(v.at)).toISOString() });
+    if (!v || !v.name) return; // 名前の無い端末は登録端末ではない
+    out.push({ id: k.substring(DEVICE_PROP_PREFIX.length), name: v.name, pending: Number(v.pending) || 0, at: new Date(Number(v.at)).toISOString(), ageMs: now - Number(v.at) });
   });
   return out;
 }
 
-// 比べる時刻（3.11-3）: 端末が ping で測ったずれ（操作を作ったときの offsetAtOp＝サーバー時刻－端末時刻）が
-// 2分を超えるときだけ at＋offsetAtOp に直す。2分以内・測れていないときは at のまま（通信の遅れで順番が入れ替わらない）。
+// 比べる時刻（3.11-3・3.12-2）: 端末が ping で測ったずれ（操作を作ったときの offsetAtOp＝サーバー時刻－端末時刻）があれば
+// 常に at＋offsetAtOp。測れていない操作（起動直後・オフライン）は at のまま。
+// （2分を超えるときだけ直すのは「記録する打刻の時刻」だけ: applyOp を参照）
 function normalizeOpTime(op, serverNow) {
   const atParsed = op ? Date.parse(op.at) : NaN;
   if (!isFinite(atParsed)) return serverNow;
   const off = op && op.offsetAtOp !== undefined && op.offsetAtOp !== null && op.offsetAtOp !== '' ? Number(op.offsetAtOp) : NaN;
-  if (isFinite(off) && Math.abs(off) > CLOCK_SKEW_WARN_MS) return atParsed + off;
-  return atParsed;
+  return isFinite(off) ? atParsed + off : atParsed;
 }
 
 function createJsonResponse(data) {
@@ -823,18 +831,18 @@ function fieldInfo(meta, f) {
   return { t: (x && Number(x.t)) || 0, q: (x && Number(x.q)) || 0, m: !!(x && x.m), L: !!(x && x.L) };
 }
 const ALL_FIELDS = ['clockIn', 'breakStart', 'breakEnd', 'clockOut', 'meal', 'transport', 'remarks', 'additionalBreakMins', 'isPaidLeave', 'deleted'];
-// 17列目が「使える」か: 空でなく、かつ 10列目（サーバーの更新時刻）が17列目に残した保存時刻（savedAt）より5秒以上新しくないこと（3.11-1）。
+// 17列目が「使える」か: 空でなく、かつ 10列目（サーバーの更新時刻）と17列目に残した保存時刻（savedAt）がぴったり同じこと（3.11-1・3.12-3）。
 // 新しい版が保存した行は10列目と savedAt が同じなので、遅れて届いた打刻を保存した行も誤判定しない。
 // 【3.10-6】古い版の GAS に戻していた間に書かれた行は15〜17列目が更新されず値と食い違うので、17列目を空として扱い、
 // 最初に書くときに作り直す。
-const META_STALE_TOLERANCE_MS = 5000;
 function hasMetaCell(row) {
   const raw = String(row[COL.meta - 1] || '').trim();
   if (!raw) return false;
   const meta = parseMeta(raw);
   const su = row[COL.serverUpdatedAt - 1];
   const suMs = su instanceof Date ? su.getTime() : (su ? Date.parse(String(su)) : NaN);
-  if (meta.savedAt && isFinite(suMs) && suMs - Number(meta.savedAt) >= META_STALE_TOLERANCE_MS) return false;
+  // 新しい版は10列目と savedAt に同じ値（秒にそろえた時刻）を書く。ぴったり一致しなければ古い版で書かれた行（3.12-3）
+  if (!meta.savedAt || !isFinite(suMs) || Math.round(suMs) !== Number(meta.savedAt)) return false;
   return true;
 }
 function metaForRow(row) {
@@ -1022,7 +1030,8 @@ function formatTimeCell(cell) {
 // 新旧は「操作した時刻をサーバーの時計に直した時刻（at＋差）」で決める（3.6-1・3.7-1）。
 // 直した時刻が全く同じなら、後から受け付けた方を新しいとする（比較は「以上」）。
 
-function applyOp(ss, op, sender, serverNow, normAt, seq, resumed) {
+function applyOp(ss, op, sender, serverNow, normAt, seq, ctx) {
+  ctx = ctx || { accept: function(b) { return b; }, markEditLogged: function() {}, editLogged: false };
   if (!op || typeof op !== 'object' || !op.opId || typeof op.opId !== 'string') {
     return { result: 'invalid', reason: 'opIdがありません' };
   }
@@ -1032,6 +1041,7 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, resumed) {
   if (op.type === 'confirm') {
     const d = op.data || {};
     // 確認日時は実行時刻ではなく操作時刻（直したもの）を使う（3.8-3）
+    ctx.accept({ exists: false, v: {} });
     const r = confirmMonth(ss, op.staffName, d.yearMonth, op.opId, atConfirm, seq);
     return { result: r.result || (r.status === 'ok' ? 'applied' : 'invalid'), reason: r.message || r.reason };
   }
@@ -1072,13 +1082,22 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, resumed) {
   else plan = planner(state, at, opData);
   const writes = plan.writes || {};
   const fields = Object.keys(writes);
+  // 変更前の値（3.12-1）: 書き換える項目の今の値。OpLog「受付」に残し、EditLog はこれと書いた値から作る。
+  // 当て直しのときは、最初に受け付けたときの変更前の値が返る
+  const beforeNow = { exists: exists, v: {} };
+  fields.forEach(function(f) {
+    const v = oldRow[COL[f] - 1];
+    beforeNow.v[f] = TIME_FIELDS.indexOf(f) !== -1 ? (formatTimeCell(v) || '') : (v instanceof Date ? v.toISOString() : v);
+  });
+  const before = ctx.accept(beforeNow) || beforeNow;
   const result = fields.length > 0 ? 'applied' : 'skipped';
   if (result === 'skipped') return { result: 'skipped', reason: plan.reason || 'nothing_to_write' };
 
   if (!sheet) sheet = createStaffSheet(ss, sheetName);
   else ensureSheetColumns(sheet);
 
-  const now = new Date(serverNow || Date.now());
+  // 10列目と savedAt に同じ値を書く（秒にそろえる: スプレッドシートの日時でも値が変わらないように。3.12-3）
+  const now = new Date(Math.floor((serverNow || Date.now()) / 1000) * 1000);
   const newRow = oldRow.slice();
   const manual = plan.manual || [];
   const leave = plan.leave || [];
@@ -1110,16 +1129,18 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, resumed) {
   // 1日分の1〜17列を1回で書き、同じ手順で EditLog も書いてから確定させる（3.9-2・3.10-1・3.11-4）。
   // EditLog の各行には opId を入れる。「受付」のまま止まった操作を当て直すときは、直近500行にその opId があれば書かない。
   sheet.getRange(targetRow, 1, 1, SHEET_COLS).setValues([newRow]);
-  const skipEditLog = resumed && editLogHasOpId(ss, op.opId);
-  if (!skipEditLog) {
-    // ===== 修正履歴（EditLog）: サーバーで実際に書いた項目のうち、値が変わったものだけ記録 =====
-    if (exists) {
-      try { logEditIfChanged(ss, sheetName, oldRow, newRow, fields, op.opId); } catch (e) { console.warn('EditLog failed:', e); }
+  if (!ctx.editLogged) {
+    // ===== 修正履歴（EditLog）: 変更前の値（OpLog「受付」に残したもの）と書いた値を比べ、変わった項目だけ記録 =====
+    const beforeRow = newRow.slice();
+    Object.keys(before.v || {}).forEach(function(f) { beforeRow[COL[f] - 1] = before.v[f]; });
+    if (before.exists) {
+      try { logEditIfChanged(ss, sheetName, beforeRow, newRow, fields, op.opId); } catch (e) { console.warn('EditLog failed:', e); }
     }
     // 時計補正の記録は、実際に時刻を書いたときだけ
-    if (clockFix && fields.indexOf(opData.field) !== -1 && formatTimeCell(oldRow[COL[opData.field] - 1]) !== writes[opData.field]) {
+    if (clockFix && fields.indexOf(opData.field) !== -1 && (before.v || {})[opData.field] !== writes[opData.field]) {
       appendEditLogLine(ss, staffName, dateStr, '時計補正 ' + clockFix.from + ' → ' + clockFix.to + '（送信元 ' + (sender || '不明') + '）', op.opId);
     }
+    ctx.markEditLogged();
   }
   SpreadsheetApp.flush();
   return { result: 'applied', reason: plan.reason };
@@ -1354,7 +1375,7 @@ function ensureSheetColumns(sheet) {
 // 【3.10-3】OpLog は月ごとのシート（OpLog_YYYYMM、受け付けた月）に書き、行は消さない。照会は直近7か月分のシートを見る。
 // 180日より古い月のシートは毎晩の自動実行で丸ごと消す（今月・先月は消さない）。
 const OPLOG_ACCEPTED = 'accepted';
-const OPLOG_COLS = 11;
+const OPLOG_COLS = 13;
 const OPLOG_LOOKUP_MONTHS = 7;
 const OPLOG_SEQ_PROP = 'OPLOG_SEQ';
 function opLogSheetName(ms) {
@@ -1365,7 +1386,7 @@ function getOpLogSheet(ss, name, create) {
   if (!sh && create) {
     sh = ss.insertSheet(name);
     sh.setTabColor('#9e9e9e');
-    sh.getRange(1, 1, 1, OPLOG_COLS).setValues([['opId', '結果', '理由', '受信時刻', '操作時刻', '種類', 'スタッフ', '日付', '送信元', '比べた時刻（直した操作時刻）', '受付順']]);
+    sh.getRange(1, 1, 1, OPLOG_COLS).setValues([['opId', '結果', '理由', '受信時刻', '操作時刻', '種類', 'スタッフ', '日付', '送信元', '比べた時刻（直した操作時刻）', '受付順', '変更前の値', 'EditLog済み']]);
     sh.getRange(1, 1, 1, OPLOG_COLS).setFontWeight('bold').setBackground('#eeeeee');
   }
   return sh;
@@ -1392,7 +1413,10 @@ function loadOpLog(ss) {
       const id = String(r[0] || '');
       const seq = Number(r[10]) || 0;
       if (!id || out.map[id]) return;
-      out.map[id] = { result: String(r[1] || ''), reason: String(r[2] || ''), normAt: Date.parse(String(r[9] || '')), seq: seq, ref: { sheet: name, row: i + 2 } };
+      let before = null;
+      try { before = r[11] ? JSON.parse(String(r[11])) : null; } catch (e) { before = null; }
+      out.map[id] = { result: String(r[1] || ''), reason: String(r[2] || ''), normAt: Date.parse(String(r[9] || '')), seq: seq, ref: { sheet: name, row: i + 2 },
+        before: before, editLogged: String(r[12] || '') === '1' };
     });
   });
   return out;
@@ -1407,9 +1431,10 @@ function nextOpSeq() {
   return next;
 }
 
-function opLogRowValues(op, result, reason, serverNow, sender, normAt, seq) {
+function opLogRowValues(op, result, reason, serverNow, sender, normAt, seq, before) {
   return [String(op.opId || ''), result, String(reason || '').substring(0, 500), new Date(serverNow).toISOString(), String(op.at || ''),
-    String(op.type || ''), String(op.staffName || ''), String(op.date || ''), sender || '', new Date(normAt).toISOString(), String(seq || '')];
+    String(op.type || ''), String(op.staffName || ''), String(op.date || ''), sender || '', new Date(normAt).toISOString(), String(seq || ''),
+    before ? JSON.stringify(before) : '', ''];
 }
 
 // 今月の OpLog シートに1行足して確定させ、その場所を返す
@@ -1422,6 +1447,11 @@ function appendOpLogRow(ss, values, serverNow) {
   range.setValues([values]);
   SpreadsheetApp.flush();
   return { sheet: name, row: row };
+}
+
+// 「EditLog 済み」の印（3.12-1）: EditLog を書いた同じ手順で付ける（この後の flush で一緒に確定）
+function markOpLogEditLogged(ss, ref) {
+  getOpLogSheet(ss, ref.sheet, true).getRange(ref.row, 13).setValue('1');
 }
 
 // 「受付」の行を「完了」にする（結果・理由の2列だけ書く）
@@ -1483,19 +1513,6 @@ function getEditLogSheet(ss) {
   }
   return log;
 }
-// EditLog の直近500行にこの opId があるか（当て直しで二重に書かないため）
-const EDITLOG_RESUME_SCAN_ROWS = 500;
-function editLogHasOpId(ss, opId) {
-  const log = ss.getSheetByName('EditLog');
-  if (!log || !opId) return false;
-  const last = log.getLastRow();
-  if (last < 2) return false;
-  const n = Math.min(EDITLOG_RESUME_SCAN_ROWS, last - 1);
-  const ids = log.getRange(last - n + 1, 5, n, 1).getValues();
-  for (let i = 0; i < ids.length; i++) if (String(ids[i][0]) === String(opId)) return true;
-  return false;
-}
-
 // EditLog に1行足す（時計のずれ・時計補正など）
 function appendEditLogLine(ss, who, dateStr, text, opId) {
   const log = getEditLogSheet(ss);

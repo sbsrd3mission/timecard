@@ -653,7 +653,7 @@
             // 結果（applied/skipped/invalid）のある opId だけ未送信から消す。月の範囲に関係なく確かめられる。
             // 古い版の未送信で、当てなかった項目があれば理由と一緒に管理画面の一覧へ（3.7-9）
             // 【3.8-8】新しい操作でも、180日を超えて当てなかった（too_old）・行の方が新しくて当てなかった有給/削除は一覧へ
-            const ATTENTION_REASONS = { too_old: '180日より前の操作のため当てませんでした', older_than_row: 'クラウドの記録の方が新しいため当てませんでした（有給の設定・取消／削除）', before_delete: '削除より前の操作のため当てませんでした' };
+            const ATTENTION_REASONS = { too_old: '180日より前の操作のため当てませんでした', older_than_row: 'クラウドの記録の方が新しいため当てませんでした（有給の設定・取消／削除）', before_delete: '削除より前の操作のため当てませんでした', paid_leave: '有給の日のため打刻を当てませんでした', deleted: '削除済みの日のため当てませんでした' };
             const noteLegacyResult = (op, res) => {
                 if (!op || !res || !res.reason || res.duplicate) return;
                 if (op.type !== 'legacy' && !(res.result === 'skipped' && ATTENTION_REASONS[res.reason])) return;

@@ -1139,7 +1139,8 @@ function canWriteAttr(st, f, at) {
 
 // ----- ルール: punch（打刻ボタン・「情報のみ保存」）3.6-2・3.7-3 -----
 function planPunch(st, at, data) {
-  if (st.deleted) return { writes: {}, reason: 'deleted' };
+  // 【2026-11-08 通し試験で見つかった点】完全取消した日に、取消より後で打刻したら受け付けて削除を外す
+  // （取消より前の操作は呼び出し側で before_delete になる）。今までは黙って受け付けず、打刻が消えていた。
   if (st.paidLeave) return { writes: {}, reason: 'paid_leave' };
   const writes = {};
   if (data.field && TIME_FIELDS.indexOf(data.field) !== -1 && data.time) {
@@ -1150,6 +1151,7 @@ function planPunch(st, at, data) {
     if (!Object.prototype.hasOwnProperty.call(attrs, f)) return; // 触っていない項目は送られない＝消さない
     if (canWriteAttr(st, f, at)) writes[f] = encodeField(f, attrs[f]);
   });
+  if (st.deleted && Object.keys(writes).length) writes.deleted = '';
   return { writes: writes, reason: Object.keys(writes).length ? undefined : 'no_change_allowed' };
 }
 

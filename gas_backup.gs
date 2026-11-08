@@ -1141,6 +1141,7 @@ function canWriteAttr(st, f, at) {
 function planPunch(st, at, data) {
   // 【2026-11-08 通し試験で見つかった点】完全取消した日に、取消より後で打刻したら受け付けて削除を外す
   // （取消より前の操作は呼び出し側で before_delete になる）。今までは黙って受け付けず、打刻が消えていた。
+  // 取消と打刻の時刻（直した操作時刻）がまったく同じときは、ほかの項目と同じく受付順が後の方が勝つ（notOlder）。
   if (st.paidLeave) return { writes: {}, reason: 'paid_leave' };
   const writes = {};
   if (data.field && TIME_FIELDS.indexOf(data.field) !== -1 && data.time) {

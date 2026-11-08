@@ -208,9 +208,12 @@
                 return out;
             };
             if (op.type === 'punch') {
-                if (rec.deleted || rec.isPaidLeave) return rec;
-                if (d.field && d.time) { const fi = fieldOf(rec, d.field); if (!rec[d.field] && !fi.m && at >= fi.t) set(d.field, d.time); }
-                Object.keys(d.attrs || {}).forEach(k => { const fi = fieldOf(rec, k); if (!fi.m && at >= fi.t) set(k, d.attrs[k]); });
+                // 完全取消より後の打刻は記録して取消を外す（サーバーと同じ。取消より前の打刻は上で弾いている）
+                if (rec.isPaidLeave) return rec;
+                let wrote = false;
+                if (d.field && d.time) { const fi = fieldOf(rec, d.field); if (!rec[d.field] && !fi.m && at >= fi.t) { set(d.field, d.time); wrote = true; } }
+                Object.keys(d.attrs || {}).forEach(k => { const fi = fieldOf(rec, k); if (!fi.m && at >= fi.t) { set(k, d.attrs[k]); wrote = true; } });
+                if (wrote && rec.deleted) rec.deleted = false;
             } else if (op.type === 'edit') {
                 const f = d.fields || {};
                 const hasLeave = Object.prototype.hasOwnProperty.call(f, 'isPaidLeave');

@@ -219,11 +219,20 @@ function getLeaveInfo(year) {
     const folder = DriveApp.getFolderById(LEAVE_FOLDER_ID);
     const keyword = LEAVE_FILE_NAME_PREFIX + year;
     const files = folder.searchFiles(`title contains '${keyword.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.spreadsheet'`);
-    if (!files.hasNext()) {
+    // 「年次有給休暇管理簿2026旧」のような古い控えを拾わないよう、名前に「旧」を含むものは除き、
+    // 名前がちょうど一致するものを優先する（2026-11-08）
+    let file = null;
+    while (files.hasNext()) {
+      const f = files.next();
+      const n = f.getName();
+      if (n.indexOf('旧') >= 0) continue;
+      if (n === keyword) { file = f; break; }
+      if (!file) file = f;
+    }
+    if (!file) {
       // 見つからない場合はアプリ側でアラート表示できるよう found:false を返す（打刻機能自体は止めない）
       return { found: false, fileName: null, leaveInfo: result };
     }
-    const file = files.next();
     const leaveSs = SpreadsheetApp.open(file);
     const sheet = leaveSs.getSheetByName(LEAVE_SHEET_NAME);
     if (!sheet) return { found: false, fileName: file.getName(), leaveInfo: result };

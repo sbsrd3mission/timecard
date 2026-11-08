@@ -221,40 +221,40 @@ function normalizeNameForMatch(name) {
 function getLeaveInfo(year) {
   const result = {};
   try {
-    // 管理簿ファイルの選び方（2026-11-08 コードレビュー6-2・6-3）:
-    // 「年次有給休暇管理簿」で始まり、「旧」を含まず、ゴミ箱に入っていないもののうち、
-    // 「設定」シートの期首(C2)〜期末(C3)に今日が入るものを使う（年度が5月〜翌4月でも、1〜4月に正しい年度を選ぶ）。
-    // 期間で決まらないときだけ、名前が「年次有給休暇管理簿＋年」とちょうど一致する1件を使う。
-    // 該当が0件・2件以上なら「取得できず」（found:false）にして、間違ったファイルの値は出さない。
+    // 管理簿ファイルの選び方（2026-11-08 コードレビュー6-2・6-3・7-1・7-2）:
+    // 名前がちょうど「年次有給休暇管理簿＋4けたの年」のもの（「旧」「のコピー」「控え」などが付いたものは使わない）、
+    // かつゴミ箱に入っていないもののうち、「設定」シートの期首(C2)〜期末(C3)に今日が入る1件だけを使う
+    // （年度が5月〜翌4月でも、1〜4月に正しい年度を選べる）。
+    // 期間に入るものが0件・2件以上、または読めない候補があるときは「取得できず」（found:false）にして、
+    // 間違ったファイルの値は出さない。
     const folder = DriveApp.getFolderById(LEAVE_FOLDER_ID);
-    const exactName = LEAVE_FILE_NAME_PREFIX + year;
+    const nameRe = new RegExp('^' + LEAVE_FILE_NAME_PREFIX + '\\d{4}$');
     const today = new Date();
     const byPeriod = [];
-    const byName = [];
+    const unreadable = [];
     const files = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
     while (files.hasNext()) {
       const f = files.next();
       const n = f.getName();
-      if (n.indexOf(LEAVE_FILE_NAME_PREFIX) !== 0 || n.indexOf('旧') !== -1) continue;
+      if (!nameRe.test(n)) continue;
       if (f.isTrashed && f.isTrashed()) continue;
-      if (n === exactName) byName.push(f);
       try {
         const st = SpreadsheetApp.open(f).getSheetByName(LEAVE_PERIOD_SHEET);
-        if (!st) continue;
-        const ps = st.getRange(LEAVE_PERIOD_START_CELL).getValue();
-        const pe = st.getRange(LEAVE_PERIOD_END_CELL).getValue();
-        if (!(ps instanceof Date) || !(pe instanceof Date)) continue;
+        const ps = st ? st.getRange(LEAVE_PERIOD_START_CELL).getValue() : null;
+        const pe = st ? st.getRange(LEAVE_PERIOD_END_CELL).getValue() : null;
+        if (!(ps instanceof Date) || !(pe instanceof Date)) { unreadable.push(n + '（期首・期末が読めない）'); continue; }
         const endOfDay = new Date(pe.getFullYear(), pe.getMonth(), pe.getDate(), 23, 59, 59).getTime();
         if (ps.getTime() <= today.getTime() && today.getTime() <= endOfDay) byPeriod.push(f);
-      } catch (err) { /* 読めないファイルは候補にしない */ }
+      } catch (err) { unreadable.push(n + '（開けない）'); }
     }
     let file = null;
-    if (byPeriod.length === 1) file = byPeriod[0];
-    else if (byPeriod.length === 0 && byName.length === 1) file = byName[0];
+    let why = '';
+    if (unreadable.length > 0) why = '読めない管理簿があります: ' + unreadable.join(', ');
+    else if (byPeriod.length > 1) why = '今日が期間に入る管理簿が複数あります: ' + byPeriod.map(function(f) { return f.getName(); }).join(', ');
+    else if (byPeriod.length === 0) why = '今日が期間に入る管理簿が見つかりません';
+    else file = byPeriod[0];
     if (!file) {
-      // 見つからない・決められない場合はアプリ側でアラート表示できるよう found:false を返す（打刻機能自体は止めない）
-      const why = byPeriod.length > 1 ? '今日が期間に入る管理簿が複数あります: ' + byPeriod.map(function(f) { return f.getName(); }).join(', ')
-        : byName.length > 1 ? '同じ名前の管理簿が複数あります: ' + exactName : '管理簿が見つかりません';
+      // アプリ側でアラート表示できるよう found:false と理由を返す（打刻機能自体は止めない）
       console.error('getLeaveInfo: ' + why);
       return { found: false, fileName: null, leaveInfo: result, reason: why };
     }

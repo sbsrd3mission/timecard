@@ -152,7 +152,9 @@ function doGet(e) {
     ids.forEach(function(id) {
       if (!log[id] || log[id].result === OPLOG_ACCEPTED) return;
       results[id] = { result: log[id].result, reason: log[id].reason };
-      if (log[id].before && log[id].before.c) results[id].corrected = log[id].before.c; // 直した打刻の時刻（コードレビュー1-9）
+      // 直した打刻の時刻（コードレビュー1-9）。最後に実際に書いた計画のもの（コードレビュー3-2）
+      const cr = finalCorrection(log[id].before);
+      if (cr) results[id].corrected = cr;
     });
     return createJsonResponse({ status: 'ok', results: results, generation: Number(getCacheGeneration(true)) || 0 });
   } else if (action === 'getSettings') {
@@ -625,7 +627,8 @@ function processOneOp(ss, op, opId, sender, serverNow, opLog) {
   // 同じ opId がもう一度届いたら、書き込まずに最初の結果を返す（3.6-4）
   if (logged && logged.result !== OPLOG_ACCEPTED) {
     const dup = { result: logged.result, reason: logged.reason, duplicate: true };
-    if (logged.before && logged.before.c) dup.corrected = logged.before.c;
+    const cr = finalCorrection(logged.before);
+    if (cr) dup.corrected = cr;
     return dup;
   }
   let normAt, seq, logRow = null;
@@ -1160,13 +1163,13 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, ctx) {
   // 受け付けたときの変更前の値が、この操作の書く値と同じなら、この操作の書き込みは届いていた（その操作はこの値を見て書いた）。
   // 当て直しで最後に決めた値（re）があればそれを、無ければ最初に残した値を使う。
   const storedAll = ctx.resumed && ctx.stored && ctx.stored.w ? ctx.stored : null;
-  const stored = storedAll ? (storedAll.re && storedAll.re.w ? Object.assign({}, storedAll, storedAll.re) : storedAll) : null;
+  const stored = storedAll ? effectivePlan(storedAll) : null;
   if (stored && Number(seq) > 0) {
     const ownMark = Object.keys(stored.w).some(function(f) {
       const x = meta.f[f];
       return !!x && Number(x.t) === at && Number(x.q) === Number(seq);
     });
-    const landed = ownMark || landedBeforeLaterOp(ctx.opLog, op.opId, staffName, dateStr, String(op.date || ''), Number(seq), stored);
+    const landed = ownMark || landedByWriteChain(ctx.opLog, Number(seq), stored, meta);
     if (landed) {
       if (!ctx.editLogged) {
         try {
@@ -1178,7 +1181,7 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, ctx) {
         }
         SpreadsheetApp.flush();
       }
-      return { result: 'applied', reason: stored.r, corrected: stored.c };
+      return { result: 'applied', reason: stored.r, corrected: finalCorrection(stored) };
     }
   }
 
@@ -1204,9 +1207,14 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, ctx) {
   if (fields.length > 0) {
     beforeNow.w = writes;
     beforeNow.d = dateStr; // 実際に書いた日付（時計補正で日付が変わることがある）
+    // 【コードレビュー3-1】書く項目ごとに「今その値を書いた操作の受付順」（直前に書いた操作）を残す。
+    // 項目の書き込みの順番そのものの鎖になり、受付順と書いた順が逆でも「誰が誰の上に書いたか」をたどれる
+    beforeNow.pq = {};
+    fields.forEach(function(f) { beforeNow.pq[f] = (meta.f[f] && Number(meta.f[f].q)) || 0; });
     if (plan.reason) beforeNow.r = plan.reason;
     if (clockFix) { beforeNow.cf = clockFix; beforeNow.cff = opData.field; }
     if (correctedOut) beforeNow.c = correctedOut;
+    else if (clockFix) beforeNow.c = { written: false, field: opData.field }; // 時刻の欄は書かない（休憩分数だけなど。コードレビュー3-2）
   }
   const before = ctx.accept(beforeNow) || beforeNow;
   const result = fields.length > 0 ? 'applied' : 'skipped';
@@ -1262,7 +1270,7 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, ctx) {
     }
   }
   SpreadsheetApp.flush();
-  return { result: 'applied', reason: plan.reason, corrected: correctedOut, wrote: true };
+  return { result: 'applied', reason: plan.reason, corrected: correctedOut || (clockFix ? { written: false, field: opData.field } : undefined), wrote: true };
 }
 
 // 操作1つ分の EditLog（変更前の値 before.v → 書いた値 after）。失敗したら例外を投げる（呼ぶ側で印を付けない）
@@ -1308,36 +1316,36 @@ function editLogTextsForOp(ss, opId) {
   return out;
 }
 
-// 後の操作の記録から、この操作の書き込みが届いていたかを決める（コードレビュー2-2）。
-// 書き換えた項目（変更前と書く値が違う項目）ごとに、同じ人・同じ日で、この操作より後の受付順でその項目を書く予定だった
-// 操作のうち最初のものを探し、その操作の変更前の値がこの操作の書く値と同じなら「届いていた」。
-function landedBeforeLaterOp(opLog, opId, staffName, dateStr, origDate, seq, stored) {
-  if (!opLog || !opLog.map || !stored || !stored.w) return false;
-  const changed = Object.keys(stored.w).filter(function(f) { return cmpCellValue(f, (stored.v || {})[f]) !== cmpCellValue(f, stored.w[f]); });
-  if (changed.length === 0) return false;
-  const later = [];
-  Object.keys(opLog.map).forEach(function(id) {
-    const e = opLog.map[id];
-    if (id === opId || !e || !(Number(e.seq) > seq) || !e.before || e.staff !== staffName) return;
-    const d = e.before.d || e.date;
-    if (d !== dateStr && d !== origDate) return;
-    later.push(e);
-  });
-  later.sort(function(a, b) { return Number(a.seq) - Number(b.seq); });
-  return changed.some(function(f) {
-    for (let i = 0; i < later.length; i++) {
-      const b = later[i].before;
-      const planned = b.w ? Object.prototype.hasOwnProperty.call(b.w, f) : Object.prototype.hasOwnProperty.call(b.v || {}, f);
-      if (!planned || !b.v || !Object.prototype.hasOwnProperty.call(b.v, f)) continue;
-      return cmpCellValue(f, b.v[f]) === cmpCellValue(f, stored.w[f]);
+// 書き込みの順番の鎖から、この操作の書き込みが届いていたかを決める（コードレビュー2-2・3-1）。
+// 17列目のその項目の受付順（今の値を書いた操作）から始めて、その操作が書いたときに残した「直前に書いた操作の受付順」（pq）を
+// さかのぼる。途中でこの操作の受付順に行き着けば、この操作はその項目を書いていた（後から上書きされた）。
+// 受付順の前後には頼らない（先に受け付けて止まった操作が、後で再送されて上書きした場合もたどれる）。
+function landedByWriteChain(opLog, seq, stored, meta) {
+  if (!opLog || !opLog.map || !stored || !stored.w || !(seq > 0)) return false;
+  const bySeq = {};
+  Object.keys(opLog.map).forEach(function(id) { const e = opLog.map[id]; if (e && Number(e.seq) > 0) bySeq[Number(e.seq)] = e; });
+  return Object.keys(stored.w).some(function(f) {
+    let q = (meta.f[f] && Number(meta.f[f].q)) || 0;
+    const seen = {};
+    while (q > 0 && !seen[q]) {
+      if (q === seq) return true;
+      seen[q] = true;
+      const e = bySeq[q];
+      const plan = e && e.before ? effectivePlan(e.before) : null;
+      if (!plan || !plan.pq || !Object.prototype.hasOwnProperty.call(plan.pq, f)) return false;
+      q = Number(plan.pq[f]) || 0;
     }
     return false;
   });
 }
-function cmpCellValue(f, v) {
-  if (TIME_FIELDS.indexOf(f) !== -1) return normalizeTimeValue(formatTimeCell(v) || v || '');
-  if (v === null || v === undefined) return '';
-  return String(v);
+// 最後に実際に使った計画（当て直しで決め直していれば re、無ければ最初の値）
+function effectivePlan(b) {
+  return b && b.re ? b.re : b;
+}
+// 返事に入れる時刻補正（最後に実際に使った計画のもの）
+function finalCorrection(b) {
+  const p = effectivePlan(b);
+  return p && p.c ? p.c : undefined;
 }
 
 // 行の今の状態（ルール判断用）

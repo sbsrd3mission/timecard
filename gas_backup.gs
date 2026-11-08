@@ -66,13 +66,15 @@ function isTestMode() {
   TEST_MODE_MEMO = test;
   return test;
 }
-// 試験モードでは本番の勤怠ファイルは必ず開かない。この GAS が入っている（試験用の）スプレッドシートはそのまま使える。
+// 試験モードでは本番の勤怠ファイルは必ず開かない。この GAS が入っている試験用のスプレッドシート（名前に「試験」を含むもの）はそのまま使える。
 // それ以外のファイル（戻すときの控えなど）は TEST_ALLOWED_FILE_IDS に書いたものだけ開く。
 function assertFileAllowed(id, what) {
   if (!isTestMode()) return;
   if (prodTimecardIds().indexOf(id) !== -1) throw new Error('試験モードでは本番のファイルを開けません: ' + (what || id));
   const active = SpreadsheetApp.getActiveSpreadsheet();
-  if (active && active.getId() === id) return;
+  // この GAS が入っているファイルは、名前に「試験」を含むときだけ許可リストなしで使える（コードレビュー6-1）。
+  // 本番の「タイムカードバックアップ」に誤って MODE=test を入れても、ここで止まって本番には書かない。
+  if (active && active.getId() === id && String(active.getName()).indexOf('試験') !== -1) return;
   const allowed = propIdList('TEST_ALLOWED_FILE_IDS');
   if (allowed.indexOf(id) === -1) throw new Error('試験モードで許可されていないファイルです: ' + (what || id));
 }
@@ -181,7 +183,7 @@ function doGet(e) {
     // 【2026-11-08 オーナー決定】月末時点の計算はやめ、今までどおり管理簿の今の値（今日時点）を返す
     const year = e.parameter.year || String(new Date().getFullYear());
     const result = getLeaveInfo(year);
-    return createJsonResponse({ status: 'ok', found: result.found, fileName: result.fileName, leaveInfo: result.leaveInfo });
+    return createJsonResponse({ status: 'ok', found: result.found, fileName: result.fileName, leaveInfo: result.leaveInfo, reason: result.reason || null });
   }
 
   return createJsonResponse({ status: 'error', message: 'Invalid action' });
@@ -194,6 +196,9 @@ function doGet(e) {
 const LEAVE_FOLDER_ID = '1ltoDDydrHBW1Yu6R3FX04ffd8Sa-0QEr'; // Googleドライブの「有給」フォルダ
 const LEAVE_FILE_NAME_PREFIX = '年次有給休暇管理簿';
 const LEAVE_SHEET_NAME = '管理簿';
+const LEAVE_PERIOD_SHEET = '設定';     // 管理簿ファイルの「設定」シート
+const LEAVE_PERIOD_START_CELL = 'C2'; // 期首
+const LEAVE_PERIOD_END_CELL = 'C3';   // 期末
 const LEAVE_NAME_COL = 2;      // B列: 名前
 const LEAVE_NEXT_GRANT_COL = 9; // I列: 基準日（次回付与日）
 const LEAVE_REMAINING_COL = 14; // N列: 有給残日数
@@ -216,22 +221,42 @@ function normalizeNameForMatch(name) {
 function getLeaveInfo(year) {
   const result = {};
   try {
+    // 管理簿ファイルの選び方（2026-11-08 コードレビュー6-2・6-3）:
+    // 「年次有給休暇管理簿」で始まり、「旧」を含まず、ゴミ箱に入っていないもののうち、
+    // 「設定」シートの期首(C2)〜期末(C3)に今日が入るものを使う（年度が5月〜翌4月でも、1〜4月に正しい年度を選ぶ）。
+    // 期間で決まらないときだけ、名前が「年次有給休暇管理簿＋年」とちょうど一致する1件を使う。
+    // 該当が0件・2件以上なら「取得できず」（found:false）にして、間違ったファイルの値は出さない。
     const folder = DriveApp.getFolderById(LEAVE_FOLDER_ID);
-    const keyword = LEAVE_FILE_NAME_PREFIX + year;
-    const files = folder.searchFiles(`title contains '${keyword.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.spreadsheet'`);
-    // 「年次有給休暇管理簿2026旧」のような古い控えを拾わないよう、名前に「旧」を含むものは除き、
-    // 名前がちょうど一致するものを優先する（2026-11-08）
-    let file = null;
+    const exactName = LEAVE_FILE_NAME_PREFIX + year;
+    const today = new Date();
+    const byPeriod = [];
+    const byName = [];
+    const files = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
     while (files.hasNext()) {
       const f = files.next();
       const n = f.getName();
-      if (n.indexOf('旧') >= 0) continue;
-      if (n === keyword) { file = f; break; }
-      if (!file) file = f;
+      if (n.indexOf(LEAVE_FILE_NAME_PREFIX) !== 0 || n.indexOf('旧') !== -1) continue;
+      if (f.isTrashed && f.isTrashed()) continue;
+      if (n === exactName) byName.push(f);
+      try {
+        const st = SpreadsheetApp.open(f).getSheetByName(LEAVE_PERIOD_SHEET);
+        if (!st) continue;
+        const ps = st.getRange(LEAVE_PERIOD_START_CELL).getValue();
+        const pe = st.getRange(LEAVE_PERIOD_END_CELL).getValue();
+        if (!(ps instanceof Date) || !(pe instanceof Date)) continue;
+        const endOfDay = new Date(pe.getFullYear(), pe.getMonth(), pe.getDate(), 23, 59, 59).getTime();
+        if (ps.getTime() <= today.getTime() && today.getTime() <= endOfDay) byPeriod.push(f);
+      } catch (err) { /* 読めないファイルは候補にしない */ }
     }
+    let file = null;
+    if (byPeriod.length === 1) file = byPeriod[0];
+    else if (byPeriod.length === 0 && byName.length === 1) file = byName[0];
     if (!file) {
-      // 見つからない場合はアプリ側でアラート表示できるよう found:false を返す（打刻機能自体は止めない）
-      return { found: false, fileName: null, leaveInfo: result };
+      // 見つからない・決められない場合はアプリ側でアラート表示できるよう found:false を返す（打刻機能自体は止めない）
+      const why = byPeriod.length > 1 ? '今日が期間に入る管理簿が複数あります: ' + byPeriod.map(function(f) { return f.getName(); }).join(', ')
+        : byName.length > 1 ? '同じ名前の管理簿が複数あります: ' + exactName : '管理簿が見つかりません';
+      console.error('getLeaveInfo: ' + why);
+      return { found: false, fileName: null, leaveInfo: result, reason: why };
     }
     const leaveSs = SpreadsheetApp.open(file);
     const sheet = leaveSs.getSheetByName(LEAVE_SHEET_NAME);
@@ -1865,7 +1890,7 @@ function registerProductionIds() {
 }
 
 /**
- * 【コードレビュー1-10・反映手順書 0-3】本番に出す前の試験（コピーしたスプレッドシート「タイムカード_試験用」の Apps Script で実行）。
+ * 【コードレビュー1-10・反映手順書 0-2】本番に出す前の試験（コピーしたスプレッドシート「タイムカード_試験用」の Apps Script で実行）。
  * 実際の GAS で次を確かめ、実行ログに「合格／不合格」を1行ずつ出す。最後の行が「全体: 合格」なら本番に進んでよい。
  *  1. 今月の勤怠をすべて読める（読めないシートが無い）・設定（名簿・本人確認）を読める
  *  2. 打刻 → 同じ opId の再送は二重にならない → 完全取消（試験用の名前「試験_リリース確認」で行い、最後にシートを消す）
@@ -1892,6 +1917,10 @@ function runReleaseCheck() {
     const st = getSettings(ss);
     check(!!(st && Array.isArray(st.staffList) && st.staffList.length > 0), 'スタッフ名簿を読める');
     check(!!(st && st.confirmationsOk === true), '本人確認を読める');
+    // 1-2. 有給管理簿を読む（読むだけ。管理簿は書き換えない）
+    const lv = getLeaveInfo(Utilities.formatDate(new Date(), tz, 'yyyy'));
+    const lvCount = lv && lv.leaveInfo ? Object.keys(lv.leaveInfo).length : 0;
+    check(!!(lv && lv.found && lvCount > 0), '有給管理簿を読める（' + (lv && lv.fileName ? lv.fileName : (lv && lv.reason) || '見つからない') + '、' + lvCount + '人）');
     // 2. 打刻の往復
     const staff = '試験_リリース確認';
     const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');

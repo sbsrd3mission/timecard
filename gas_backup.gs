@@ -183,7 +183,7 @@ function doGet(e) {
     // 【2026-11-08 オーナー決定】月末時点の計算はやめ、今までどおり管理簿の今の値（今日時点）を返す
     const year = e.parameter.year || String(new Date().getFullYear());
     const result = getLeaveInfo(year);
-    return createJsonResponse({ status: 'ok', found: result.found, fileName: result.fileName, leaveInfo: result.leaveInfo, reason: result.reason || null });
+    return createJsonResponse({ status: 'ok', found: result.found, fileName: result.fileName, leaveInfo: result.leaveInfo });
   }
 
   return createJsonResponse({ status: 'error', message: 'Invalid action' });
@@ -196,9 +196,6 @@ function doGet(e) {
 const LEAVE_FOLDER_ID = '1ltoDDydrHBW1Yu6R3FX04ffd8Sa-0QEr'; // Googleドライブの「有給」フォルダ
 const LEAVE_FILE_NAME_PREFIX = '年次有給休暇管理簿';
 const LEAVE_SHEET_NAME = '管理簿';
-const LEAVE_PERIOD_SHEET = '設定';     // 管理簿ファイルの「設定」シート
-const LEAVE_PERIOD_START_CELL = 'C2'; // 期首
-const LEAVE_PERIOD_END_CELL = 'C3';   // 期末
 const LEAVE_NAME_COL = 2;      // B列: 名前
 const LEAVE_NEXT_GRANT_COL = 9; // I列: 基準日（次回付与日）
 const LEAVE_REMAINING_COL = 14; // N列: 有給残日数
@@ -218,46 +215,18 @@ function normalizeNameForMatch(name) {
   return s;
 }
 
+// 【2026-11-08 オーナー決定】有給管理簿の読み取りは今までどおり（main と同じ中身のまま変えない）
 function getLeaveInfo(year) {
   const result = {};
   try {
-    // 管理簿ファイルの選び方（2026-11-08 コードレビュー6-2・6-3・7-1・7-2）:
-    // 名前がちょうど「年次有給休暇管理簿＋4けたの年」のもの（「旧」「のコピー」「控え」などが付いたものは使わない）、
-    // かつゴミ箱に入っていないもののうち、「設定」シートの期首(C2)〜期末(C3)に今日が入る1件だけを使う
-    // （年度が5月〜翌4月でも、1〜4月に正しい年度を選べる）。
-    // 期間に入るものが0件・2件以上、または読めない候補があるときは「取得できず」（found:false）にして、
-    // 間違ったファイルの値は出さない。
     const folder = DriveApp.getFolderById(LEAVE_FOLDER_ID);
-    const nameRe = new RegExp('^' + LEAVE_FILE_NAME_PREFIX + '\\d{4}$');
-    const today = new Date();
-    const byPeriod = [];
-    const unreadable = [];
-    const files = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
-    while (files.hasNext()) {
-      const f = files.next();
-      const n = f.getName();
-      if (!nameRe.test(n)) continue;
-      if (f.isTrashed && f.isTrashed()) continue;
-      try {
-        const st = SpreadsheetApp.open(f).getSheetByName(LEAVE_PERIOD_SHEET);
-        const ps = st ? st.getRange(LEAVE_PERIOD_START_CELL).getValue() : null;
-        const pe = st ? st.getRange(LEAVE_PERIOD_END_CELL).getValue() : null;
-        if (!(ps instanceof Date) || !(pe instanceof Date)) { unreadable.push(n + '（期首・期末が読めない）'); continue; }
-        const endOfDay = new Date(pe.getFullYear(), pe.getMonth(), pe.getDate(), 23, 59, 59).getTime();
-        if (ps.getTime() <= today.getTime() && today.getTime() <= endOfDay) byPeriod.push(f);
-      } catch (err) { unreadable.push(n + '（開けない）'); }
+    const keyword = LEAVE_FILE_NAME_PREFIX + year;
+    const files = folder.searchFiles(`title contains '${keyword.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.spreadsheet'`);
+    if (!files.hasNext()) {
+      // 見つからない場合はアプリ側でアラート表示できるよう found:false を返す（打刻機能自体は止めない）
+      return { found: false, fileName: null, leaveInfo: result };
     }
-    let file = null;
-    let why = '';
-    if (unreadable.length > 0) why = '読めない管理簿があります: ' + unreadable.join(', ');
-    else if (byPeriod.length > 1) why = '今日が期間に入る管理簿が複数あります: ' + byPeriod.map(function(f) { return f.getName(); }).join(', ');
-    else if (byPeriod.length === 0) why = '今日が期間に入る管理簿が見つかりません';
-    else file = byPeriod[0];
-    if (!file) {
-      // アプリ側でアラート表示できるよう found:false と理由を返す（打刻機能自体は止めない）
-      console.error('getLeaveInfo: ' + why);
-      return { found: false, fileName: null, leaveInfo: result, reason: why };
-    }
+    const file = files.next();
     const leaveSs = SpreadsheetApp.open(file);
     const sheet = leaveSs.getSheetByName(LEAVE_SHEET_NAME);
     if (!sheet) return { found: false, fileName: file.getName(), leaveInfo: result };
@@ -1920,7 +1889,7 @@ function runReleaseCheck() {
     // 1-2. 有給管理簿を読む（読むだけ。管理簿は書き換えない）
     const lv = getLeaveInfo(Utilities.formatDate(new Date(), tz, 'yyyy'));
     const lvCount = lv && lv.leaveInfo ? Object.keys(lv.leaveInfo).length : 0;
-    check(!!(lv && lv.found && lvCount > 0), '有給管理簿を読める（' + (lv && lv.fileName ? lv.fileName : (lv && lv.reason) || '見つからない') + '、' + lvCount + '人）');
+    check(!!(lv && lv.found && lvCount > 0), '有給管理簿を読める（' + (lv && lv.fileName ? lv.fileName : '見つからない') + '、' + lvCount + '人）');
     // 2. 打刻の往復
     const staff = '試験_リリース確認';
     const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');

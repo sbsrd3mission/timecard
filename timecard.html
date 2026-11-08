@@ -1709,7 +1709,7 @@
                     if (lv && lv.status === 'ok' && lv.found && lv.leaveInfo) {
                         leaveInfo = lv.leaveInfo; leaveOk = true;
                     } else if (lv && lv.status === 'ok' && !lv.found) {
-                        leaveFailReason = lv.reason ? `有給管理簿: ${lv.reason}` : `Googleドライブの「有給」フォルダに「年次有給休暇管理簿${yearStr}」が見つかりません`;
+                        leaveFailReason = `Googleドライブの「有給」フォルダに「年次有給休暇管理簿${yearStr}」が見つかりません`;
                     } else {
                         leaveFailReason = leaveRes.status === 'rejected' ? (leaveRes.reason?.message || '通信エラー') : ((lv && (lv.reason || lv.message)) || '不明');
                     }

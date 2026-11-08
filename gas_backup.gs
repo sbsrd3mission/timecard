@@ -42,16 +42,16 @@ const OP_TOO_OLD_DAYS = 180;
 // ===== 試験中は本番に書けないようにする（3.8-7） =====
 // スクリプトのプロパティに MODE=test と TEST_ALLOWED_FILE_IDS（使ってよいファイルIDをカンマ区切り）を登録すると、
 // 登録外のファイルを開こうとしたら処理を止める。本番のファイルIDは下に書いておき、MODE=test では必ず止める。
-// 【コードレビュー1-10】本番の ID はコードに書かず、スクリプト プロパティ PROD_TIMECARD_SS_IDS / PROD_LEAVE_BOOK_IDS
-// （カンマ区切り）に置く。本番の Apps Script で registerProductionIds() を1回実行すると自動で登録される（反映手順書 5）。
-// 下の2つはコードに直接書きたいとき用の予備（ふだんは空のまま）。
+// 【コードレビュー1-10】本番の ID はコードに書かず、スクリプト プロパティ PROD_TIMECARD_SS_IDS（カンマ区切り）に置く。
+// 本番の Apps Script で registerProductionIds() を1回実行すると自動で登録される（反映手順書 5）。
+// 下はコードに直接書きたいとき用の予備（ふだんは空のまま）。
+// 【2026-11-08 オーナー決定】有給の月末計算をやめたので、有給管理簿の ID の登録（PROD_LEAVE_BOOK_IDS）は使わない
+// （管理簿は今までどおり読むだけ）。
 const PROD_TIMECARD_SS_IDS = [/* 本番「タイムカードバックアップ」のID */];
-const PROD_LEAVE_BOOK_IDS = [/* 本番「年次有給休暇管理簿20xx」のID */];
 function propIdList(key) {
   return String(PropertiesService.getScriptProperties().getProperty(key) || '').split(',').map(function(x) { return x.trim(); }).filter(Boolean);
 }
 function prodTimecardIds() { return PROD_TIMECARD_SS_IDS.concat(propIdList('PROD_TIMECARD_SS_IDS')); }
-function prodLeaveBookIds() { return PROD_LEAVE_BOOK_IDS.concat(propIdList('PROD_LEAVE_BOOK_IDS')); }
 // 【3.9-7】実行中のスプレッドシートが本番の ID でなければ、MODE=test が無くても試験扱いにする（設定し忘れの防止）。
 // ※ 本番 ID が未登録のときは自動判定できないので、MODE だけで決める。
 let TEST_MODE_MEMO = null;
@@ -66,10 +66,14 @@ function isTestMode() {
   TEST_MODE_MEMO = test;
   return test;
 }
+// 試験モードでは本番の勤怠ファイルは必ず開かない。この GAS が入っている（試験用の）スプレッドシートはそのまま使える。
+// それ以外のファイル（戻すときの控えなど）は TEST_ALLOWED_FILE_IDS に書いたものだけ開く。
 function assertFileAllowed(id, what) {
   if (!isTestMode()) return;
-  if (prodTimecardIds().concat(prodLeaveBookIds()).indexOf(id) !== -1) throw new Error('試験モードでは本番のファイルを開けません: ' + (what || id));
-  const allowed = String(PropertiesService.getScriptProperties().getProperty('TEST_ALLOWED_FILE_IDS') || '').split(',').map(function(x) { return x.trim(); }).filter(Boolean);
+  if (prodTimecardIds().indexOf(id) !== -1) throw new Error('試験モードでは本番のファイルを開けません: ' + (what || id));
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active && active.getId() === id) return;
+  const allowed = propIdList('TEST_ALLOWED_FILE_IDS');
   if (allowed.indexOf(id) === -1) throw new Error('試験モードで許可されていないファイルです: ' + (what || id));
 }
 function getTimecardSs() {
@@ -174,10 +178,7 @@ function doGet(e) {
   } else if (action === 'ping') {
     return createJsonResponse({ status: 'ok', message: 'pong', timestamp: new Date().toISOString() });
   } else if (action === 'getLeaveInfo') {
-    if (e.parameter.month) {
-      // 【2026-11-08】対象月の末日時点の残日数・次回付与日（3.4・3.5-9）
-      return createJsonResponse(getLeaveInfoAtMonthEnd(e.parameter.month));
-    }
+    // 【2026-11-08 オーナー決定】月末時点の計算はやめ、今までどおり管理簿の今の値（今日時点）を返す
     const year = e.parameter.year || String(new Date().getFullYear());
     const result = getLeaveInfo(year);
     return createJsonResponse({ status: 'ok', found: result.found, fileName: result.fileName, leaveInfo: result.leaveInfo });
@@ -215,7 +216,7 @@ function normalizeNameForMatch(name) {
 function getLeaveInfo(year) {
   const result = {};
   try {
-    const folder = DriveApp.getFolderById(getLeaveFolderId());
+    const folder = DriveApp.getFolderById(LEAVE_FOLDER_ID);
     const keyword = LEAVE_FILE_NAME_PREFIX + year;
     const files = folder.searchFiles(`title contains '${keyword.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.spreadsheet'`);
     if (!files.hasNext()) {
@@ -223,7 +224,7 @@ function getLeaveInfo(year) {
       return { found: false, fileName: null, leaveInfo: result };
     }
     const file = files.next();
-    const leaveSs = openSpreadsheetChecked(file.getId(), file.getName());
+    const leaveSs = SpreadsheetApp.open(file);
     const sheet = leaveSs.getSheetByName(LEAVE_SHEET_NAME);
     if (!sheet) return { found: false, fileName: file.getName(), leaveInfo: result };
     const lastRow = sheet.getLastRow();
@@ -248,290 +249,6 @@ function getLeaveInfo(year) {
     console.error('getLeaveInfo error: ' + e.message);
     return { found: false, fileName: null, leaveInfo: result };
   }
-}
-
-
-// ===== 有給を「対象月の末日時点」で計算する（設計書 3.4・3.5-9・3.6-10・3.7-10） =====
-// 管理簿の原本は「今日」基準のまま（読むだけ）。Excel に出す値だけ、専用のスプレッドシート
-// 「有給月末計算用（触らない）」の中へ 設定→スタッフ名簿→管理簿 の順にシートをコピーし、
-// 設定!C5（現在日）を対象月の末日にして計算し直した値を読む。
-// - 専用ファイルの ID はスクリプトプロパティ LEAVE_CALC_SS_ID に登録する（反映手順書を参照）。
-// - 同時実行: getScriptLock をごく短く取り、その中で「計算中（3分で失効）」の印を ScriptProperties に立てるだけ。
-//   計算はロックの外で行い、終わったら（失敗でも）印を消す。印が立っていれば「少し待ってもう一度」。
-// - 【3.8-6】印には計算ごとの実行番号（ランダム）を入れる。シートを触る前・印を消す前に、印がまだ自分の
-//   実行番号かを確かめる（自分のものでなければ触らない・消さない）。計算は2分で打ち切る。
-// - 成功した結果は30秒間そのまま返す（アプリの自動の再試行で弾かれない）。
-// - 計算用ファイルは、ID と名前の確認のあと、_keep 以外のシートをすべて消してから始める。
-// - 失敗したら found:false（アプリは「取得できず」と書いて出力を続ける）。
-const LEAVE_CALC_SS_PROP = 'LEAVE_CALC_SS_ID';
-const LEAVE_CALC_SS_NAME = '有給月末計算用（触らない）';
-const LEAVE_CALC_RUNNING_PROP = 'LEAVE_CALC_RUNNING_UNTIL';
-// 【3.9-6】印の失効は7分（GAS の1回の実行は最長6分で必ず止まる → 印が失効していれば前の計算は確実に終わっている）
-const LEAVE_CALC_RUNNING_MS = 7 * 60 * 1000;
-const LEAVE_CALC_RESULT_CACHE_SECONDS = 30;
-// 計算そのものは2分で打ち切る（各手順の間で経過時間を確かめ、超えたらそれ以上シートに触らない。3.9-6）
-const LEAVE_CALC_TIMEOUT_MS = 2 * 60 * 1000;
-const LEAVE_CALC_KEEP_SHEET = '_keep';
-const LEAVE_COPY_ORDER = ['設定', 'スタッフ名簿', '管理簿']; // 参照先が先にある順番
-const LEAVE_SETTINGS_SHEET = '設定';
-const LEAVE_PERIOD_START_CELL = 'C2'; // 期首
-const LEAVE_PERIOD_END_CELL = 'C3';   // 期末
-const LEAVE_TODAY_CELL = 'C5';        // 現在日（原本は TODAY()）
-const LEAVE_ERROR_RE = /^#(REF!|N\/A|VALUE!|DIV\/0!|NAME\?|NUM!|NULL!|ERROR!)/;
-const LEAVE_EXTERNAL_RE = /IMPORTRANGE|IMPORTDATA|IMPORTXML|IMPORTHTML|IMPORTFEED|\[[^\]]+\]/i;
-
-function getLeaveInfoAtMonthEnd(month) {
-  const m = String(month || '').match(/^(\d{4})-?(\d{2})$/);
-  if (!m) return { status: 'error', message: '対象月の形式が不正です' };
-  const y = parseInt(m[1], 10), mo = parseInt(m[2], 10);
-  const lastDay = new Date(y, mo, 0).getDate();
-  const monthEnd = new Date(y, mo - 1, lastDay);
-  const baseDate = y + '/' + mo + '/' + lastDay;
-  const fail = function(reason) {
-    console.warn('getLeaveInfoAtMonthEnd: ' + reason);
-    return { status: 'ok', found: false, reason: reason, baseDate: baseDate, leaveInfo: {} };
-  };
-
-  // 成功した結果は30秒間そのまま返す
-  const cache = CacheService.getScriptCache();
-  const cacheKey = 'leave_result_' + m[1] + m[2];
-  try { const hit = cache.get(cacheKey); if (hit) return JSON.parse(hit); } catch (e) {}
-
-  // 「計算中」の印を、ごく短いロックの中で立てる（打刻を待たせない）
-  const props = PropertiesService.getScriptProperties();
-  const lock = LockService.getScriptLock();
-  try { lock.waitLock(3000); } catch (e) { return { status: 'busy', message: '混み合っています。少し待ってもう一度お試しください。' }; }
-  const runId = Utilities.getUuid();
-  try {
-    const flag = readLeaveCalcFlag();
-    if (flag && flag.until > Date.now()) return { status: 'busy', message: '有給の計算中です。少し待ってもう一度お試しください。' };
-    props.setProperty(LEAVE_CALC_RUNNING_PROP, JSON.stringify({ runId: runId, until: Date.now() + LEAVE_CALC_RUNNING_MS }));
-  } finally {
-    lock.releaseLock();
-  }
-
-  // 自分の印のままか・2分を過ぎていないか（シートを触る前に毎回確かめる）
-  const startedAt = Date.now();
-  const guard = function() {
-    if (Date.now() - startedAt > LEAVE_CALC_TIMEOUT_MS) throw new Error('有給の月末計算が2分を超えたため打ち切りました');
-    if (!leaveCalcOwnedBy(runId)) throw new Error('計算中の印が自分のものではなくなったため中止しました');
-  };
-  guard.canCleanUp = function() { return Date.now() - startedAt <= LEAVE_CALC_TIMEOUT_MS && leaveCalcOwnedBy(runId); };
-
-  try {
-    const result = computeLeaveAtMonthEnd(monthEnd, baseDate, fail, guard);
-    if (result && result.status === 'ok' && result.found) {
-      try { cache.put(cacheKey, JSON.stringify(result), LEAVE_CALC_RESULT_CACHE_SECONDS); } catch (e) {}
-    }
-    return result;
-  } catch (e) {
-    return fail('有給の月末計算に失敗しました: ' + (e && e.message ? e.message : e));
-  } finally {
-    // 終わったら（失敗でも）印を消す → すぐやり直せる。ただし自分の印のときだけ（3.8-6）
-    try {
-      const lock2 = LockService.getScriptLock();
-      if (lock2.tryLock(3000)) {
-        try { if (leaveCalcOwnedBy(runId)) props.deleteProperty(LEAVE_CALC_RUNNING_PROP); } finally { lock2.releaseLock(); }
-      }
-    } catch (e2) {}
-  }
-}
-
-// 「計算中」印を読む（{runId, until}。古い形式の数字だけの印も until として読む）
-function readLeaveCalcFlag() {
-  const raw = PropertiesService.getScriptProperties().getProperty(LEAVE_CALC_RUNNING_PROP);
-  if (!raw) return null;
-  try {
-    const v = JSON.parse(raw);
-    if (v && typeof v === 'object') return { runId: String(v.runId || ''), until: Number(v.until || 0) };
-    return { runId: '', until: Number(v || 0) };
-  } catch (e) {
-    return { runId: '', until: Number(raw || 0) };
-  }
-}
-function leaveCalcOwnedBy(runId) {
-  const flag = readLeaveCalcFlag();
-  return !!flag && flag.runId === runId && flag.until > Date.now();
-}
-
-function computeLeaveAtMonthEnd(monthEnd, baseDate, fail, guard) {
-  guard = guard || function() {};
-  const ssId = PropertiesService.getScriptProperties().getProperty(LEAVE_CALC_SS_PROP);
-  if (!ssId) return fail('有給月末計算用スプレッドシートのIDが未登録です（' + LEAVE_CALC_SS_PROP + '）');
-
-  // 1. 管理簿ファイルを選ぶ: 「年次有給休暇管理簿」で始まり「旧」を含まず、期首〜期末に月末が入るもの
-  const picked = findLeaveBookForDate(monthEnd);
-  if (picked.error) return fail(picked.error);
-  const src = picked.spreadsheet;
-
-  // 2. 実行前の確認: 計算用ファイルが、タイムカードとも原本とも違うこと・名前が決まりどおりであること
-  if (ssId === SpreadsheetApp.getActiveSpreadsheet().getId()) return fail('計算用ファイルのIDがタイムカードのスプレッドシートと同じです');
-  if (ssId === src.getId()) return fail('計算用ファイルのIDが管理簿の原本と同じです');
-  const calcSs = openSpreadsheetChecked(ssId, '有給月末計算用ファイル');
-  if (calcSs.getName() !== LEAVE_CALC_SS_NAME) return fail('計算用ファイルの名前が「' + LEAVE_CALC_SS_NAME + '」ではありません');
-  if (src.getNamedRanges && src.getNamedRanges().length > 0) return fail('管理簿に名前付き範囲があるため月末計算できません');
-
-  // 3. 原本のシートの存在と TODAY()/NOW() の直接使用・他ファイル参照を確認（設定!C5 以外）
-  const srcSheets = {};
-  for (const name of LEAVE_COPY_ORDER) {
-    const sh = src.getSheetByName(name);
-    if (!sh) return fail('管理簿に「' + name + '」シートがありません');
-    srcSheets[name] = sh;
-    const bad = findBadFormula(sh, name);
-    if (bad) return fail(bad);
-  }
-  // 原本の「今の値」（コピー直後の値と全員一致することを確かめるため）
-  const originalNow = readLeaveValues(srcSheets['管理簿']);
-  if (originalNow.error) return fail('原本: ' + originalNow.error);
-
-  let touched = false;
-  try {
-    // 4. 計算用ファイルの中を空にしてから（_keep 以外のシートをすべて消す）コピーする
-    guard();
-    touched = true;
-    clearLeaveCalcSheets(calcSs, guard);
-    for (const name of LEAVE_COPY_ORDER) {
-      guard();
-      const copied = srcSheets[name].copyTo(calcSs);
-      guard();
-      copied.setName(name); // 1枚コピーするごとにすぐ元の名前に変える（参照が切れないように）
-    }
-    guard();
-    const copiedBook = calcSs.getSheetByName(LEAVE_SHEET_NAME);
-    const badCopy = findBadFormula(copiedBook, LEAVE_SHEET_NAME);
-    if (badCopy) return fail('コピー後: ' + badCopy);
-
-    // 5. コピー直後（C5 を変える前）に、原本の今の値と全員一致すること
-    const copyNow = readLeaveValues(copiedBook);
-    guard();
-    if (copyNow.error) return fail('コピー直後: ' + copyNow.error);
-    const names = Object.keys(originalNow.info);
-    if (names.length !== Object.keys(copyNow.info).length) return fail('コピー後の人数が原本と違います');
-    for (const n of names) {
-      const a = originalNow.info[n], b = copyNow.info[n];
-      if (!b || String(a.remainingDays) !== String(b.remainingDays) || String(a.nextGrantDate) !== String(b.nextGrantDate)) {
-        return fail('コピー後の値が原本と一致しません（' + n + '）');
-      }
-    }
-
-    // 6. 現在日を対象月の末日にして、flush は1回。残日数（N列）・次回付与日（I列）を読む
-    guard();
-    calcSs.getSheetByName(LEAVE_SETTINGS_SHEET).getRange(LEAVE_TODAY_CELL).setValue(monthEnd);
-    SpreadsheetApp.flush();
-    const atMonthEnd = readLeaveValues(copiedBook);
-    guard();
-    if (atMonthEnd.error) return fail(atMonthEnd.error);
-    return { status: 'ok', found: true, fileName: picked.fileName, baseDate: baseDate, leaveInfo: atMonthEnd.info };
-  } finally {
-    // 「最後に必ず実行」: コピーしたシートを消す（印がまだ自分のものときだけ。他の計算の途中を壊さない）
-    try {
-      // 2分を超えて打ち切ったときは触らない（残ったシートは次回の最初に消える）
-      if (touched && guardOwnedOnly(guard)) clearLeaveCalcSheets(calcSs);
-    } catch (e2) { console.warn('leave calc cleanup failed', e2); }
-  }
-}
-
-// 後片付けしてよいか: 2分以内で、印がまだ自分のもの
-function guardOwnedOnly(guard) {
-  return guard.canCleanUp ? guard.canCleanUp() : true;
-}
-
-// TODAY()/NOW() の直接使用（設定!C5 以外）と、他のファイルの参照（IMPORTRANGE 等）を探す
-function findBadFormula(sh, name) {
-  const lr = sh.getLastRow(), lc = sh.getLastColumn();
-  if (lr < 1 || lc < 1) return null;
-  const formulas = sh.getRange(1, 1, lr, lc).getFormulas();
-  for (let r = 0; r < formulas.length; r++) {
-    for (let c = 0; c < formulas[r].length; c++) {
-      const f = String(formulas[r][c] || '');
-      if (!f) continue;
-      const a1 = columnToLetter(c + 1) + (r + 1);
-      if (LEAVE_EXTERNAL_RE.test(f)) return '「' + name + '」' + a1 + ' が他のファイルを参照しています';
-      if (name === LEAVE_SETTINGS_SHEET && a1 === LEAVE_TODAY_CELL) continue;
-      if (/TODAY\s*\(|NOW\s*\(/i.test(f)) return '「' + name + '」' + a1 + ' が TODAY()/NOW() を直接使っています';
-    }
-  }
-  return null;
-}
-
-// 管理簿の B（名前）・I（次回付与日）・N（残日数）を読む。名前のある行にエラー値があれば error
-function readLeaveValues(sheet) {
-  const lastRow = sheet.getLastRow();
-  const info = {};
-  if (lastRow < 2) return { info: info };
-  const range = sheet.getRange(2, 1, lastRow - 1, LEAVE_REMAINING_COL);
-  const values = range.getValues();
-  const shown = range.getDisplayValues();
-  const tz = Session.getScriptTimeZone();
-  for (let i = 0; i < values.length; i++) {
-    const row = values[i];
-    const rawName = String(row[LEAVE_NAME_COL - 1] || '').trim();
-    if (!rawName) continue;
-    const remainShown = String(shown[i][LEAVE_REMAINING_COL - 1] || '');
-    const nextShown = String(shown[i][LEAVE_NEXT_GRANT_COL - 1] || '');
-    if (LEAVE_ERROR_RE.test(remainShown) || LEAVE_ERROR_RE.test(nextShown)) {
-      return { error: '管理簿の「' + rawName + '」の行にエラー値（' + (LEAVE_ERROR_RE.test(remainShown) ? remainShown : nextShown) + '）があります' };
-    }
-    const nextGrantRaw = row[LEAVE_NEXT_GRANT_COL - 1];
-    const nextGrant = nextGrantRaw instanceof Date
-      ? Utilities.formatDate(nextGrantRaw, tz, 'yyyy/MM/dd')
-      : (nextGrantRaw || '');
-    info[normalizeNameForMatch(rawName)] = {
-      remainingDays: row[LEAVE_REMAINING_COL - 1],
-      nextGrantDate: nextGrant,
-    };
-  }
-  return { info: info };
-}
-
-// 計算用ファイルの _keep 以外のシートをすべて消す（ID と名前の確認のあとだけ呼ぶ。途中で止まった前回の残りも消える）
-function clearLeaveCalcSheets(calcSs, guard) {
-  if (!calcSs.getSheetByName(LEAVE_CALC_KEEP_SHEET)) calcSs.insertSheet(LEAVE_CALC_KEEP_SHEET);
-  calcSs.getSheets().forEach(function(sh) {
-    if (sh.getName() === LEAVE_CALC_KEEP_SHEET) return;
-    if (guard) guard(); // 1枚消すごとに経過時間と印を確かめる（3.9-6）
-    calcSs.deleteSheet(sh);
-  });
-}
-
-// 管理簿ファイルの選び方（3.4）: 見つからない・複数ある場合は error
-function findLeaveBookForDate(targetDate) {
-  const folder = DriveApp.getFolderById(getLeaveFolderId());
-  const files = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
-  const matches = [];
-  while (files.hasNext()) {
-    const f = files.next();
-    const name = f.getName();
-    if (name.indexOf(LEAVE_FILE_NAME_PREFIX) !== 0 || name.indexOf('旧') !== -1) continue;
-    const ss = openSpreadsheetChecked(f.getId(), name);
-    const st = ss.getSheetByName(LEAVE_SETTINGS_SHEET);
-    if (!st) continue;
-    const start = st.getRange(LEAVE_PERIOD_START_CELL).getValue();
-    const end = st.getRange(LEAVE_PERIOD_END_CELL).getValue();
-    if (!(start instanceof Date) || !(end instanceof Date)) continue;
-    const t = targetDate.getTime();
-    const endOfDay = new Date(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59).getTime();
-    if (start.getTime() <= t && t <= endOfDay) matches.push({ spreadsheet: ss, fileName: name });
-  }
-  if (matches.length === 0) return { error: '対象月末が期間に入る管理簿が見つかりません' };
-  if (matches.length > 1) return { error: '対象月末が期間に入る管理簿が複数あります: ' + matches.map(function(x) { return x.fileName; }).join(', ') };
-  return matches[0];
-}
-
-// 管理簿のフォルダ。MODE=test では TEST_LEAVE_FOLDER_ID（試験用の写しを置いたフォルダ）を使う（3.8-7）
-function getLeaveFolderId() {
-  if (isTestMode()) {
-    const id = PropertiesService.getScriptProperties().getProperty('TEST_LEAVE_FOLDER_ID');
-    if (!id) throw new Error('試験モードでは TEST_LEAVE_FOLDER_ID の登録が必要です');
-    return id;
-  }
-  return LEAVE_FOLDER_ID;
-}
-
-function columnToLetter(col) {
-  let s = '';
-  while (col > 0) { const m = (col - 1) % 26; s = String.fromCharCode(65 + m) + s; col = Math.floor((col - 1) / 26); }
-  return s;
 }
 
 function doPost(e) {
@@ -2120,9 +1837,8 @@ function listRowsChangedSinceBackup() {
 }
 
 /**
- * 【コードレビュー1-10・反映手順書 5】本番の Apps Script で1回だけ実行する: この勤怠ファイルの ID と、
- * 「有給」フォルダの「年次有給休暇管理簿」の ID を、スクリプト プロパティ PROD_TIMECARD_SS_IDS / PROD_LEAVE_BOOK_IDS に登録する。
- * （コードを書き換えずに「試験のときに本番を開かない仕組み」を使えるようにする）
+ * 【コードレビュー1-10・反映手順書 5】本番の Apps Script で1回だけ実行する: この勤怠ファイルの ID を
+ * スクリプト プロパティ PROD_TIMECARD_SS_IDS に登録する（コードを書き換えずに「試験のときに本番を開かない仕組み」を使えるようにする）。
  * 試験用のコピー（MODE=test、または名前に「コピー」「控え」「試験」を含む）では登録しない。
  */
 function registerProductionIds() {
@@ -2133,77 +1849,42 @@ function registerProductionIds() {
     console.log('NG: 試験用のファイル（' + name + '）では登録しません。本番の勤怠スプレッドシートの Apps Script で実行してください');
     return null;
   }
-  const books = [];
-  const it = DriveApp.getFolderById(LEAVE_FOLDER_ID).getFilesByType(MimeType.GOOGLE_SHEETS);
-  while (it.hasNext()) {
-    const f = it.next();
-    if (String(f.getName()).indexOf(LEAVE_FILE_NAME_PREFIX) === 0) books.push(f.getId());
-  }
   props.setProperty('PROD_TIMECARD_SS_IDS', ss.getId());
-  props.setProperty('PROD_LEAVE_BOOK_IDS', books.join(','));
   TEST_MODE_MEMO = null;
-  console.log('OK: 本番の勤怠ファイル「' + name + '」と、有給管理簿 ' + books.length + ' 件を登録しました');
-  return { timecard: ss.getId(), leaveBooks: books };
+  console.log('OK: 本番の勤怠ファイル「' + name + '」を登録しました');
+  return { timecard: ss.getId() };
 }
 
 /**
- * 【コードレビュー1-10・反映手順書 0-3】本番に出す前の試験（コピーしたスプレッドシートの Apps Script で実行）。
- * 実際の GAS で次を確かめ、実行ログに「合格／不合格／目で確認」を1行ずつ出す。最後の行が「全体: 合格」なら本番に進んでよい。
- *  1. 10月分の高橋さん = 8日・2026/11/01（chihiro 確認済みの正解）
- *  2. 9月分の小田さん（10/3 付与を含まない値）・4月分（前年度ファイルへの切り替わり）を表示（chihiro の手直しの値と目で照らす）
- *  3. 有給の計算中に別の計算が来たら「少し待って」になり、他人の印を消さない。終わったら計算用ファイルは _keep だけ
- *  4. 打刻 → 同じ opId の再送は二重にならない → 完全取消（試験用の名前「試験_リリース確認」で行い、最後にシートを消す）
- * 本番のファイルでは動かない（試験モードでなければ止まる）。
+ * 【コードレビュー1-10・反映手順書 0-3】本番に出す前の試験（コピーしたスプレッドシート「タイムカード_試験用」の Apps Script で実行）。
+ * 実際の GAS で次を確かめ、実行ログに「合格／不合格」を1行ずつ出す。最後の行が「全体: 合格」なら本番に進んでよい。
+ *  1. 今月の勤怠をすべて読める（読めないシートが無い）・設定（名簿・本人確認）を読める
+ *  2. 打刻 → 同じ opId の再送は二重にならない → 完全取消（試験用の名前「試験_リリース確認」で行い、最後にシートを消す）
+ * 本番のファイルでは動かない（試験モードでなければ止まる）。有給の管理簿・計算用のファイルは使わない（2026-11-08 オーナー決定）。
  */
 function runReleaseCheck() {
   const lines = [];
   let ok = true;
   const check = function(cond, msg) { lines.push((cond ? '合格: ' : '不合格: ') + msg); if (!cond) ok = false; };
-  const show = function(msg) { lines.push('目で確認: ' + msg); };
   const finish = function() {
     lines.push(ok ? '全体: 合格' : '全体: 不合格（本番に進まないでください）');
     lines.forEach(function(l) { console.log(l); });
     return { ok: ok, lines: lines };
   };
-  if (!isTestMode()) { ok = false; lines.push('不合格: 試験モードではありません（MODE=test を登録した、コピーのスプレッドシートで実行してください）'); return finish(); }
-  const cache = CacheService.getScriptCache();
-  const findBy = function(info, prefix) {
-    const keys = Object.keys(info || {}).filter(function(k) { return normalizeNameForMatch(k).indexOf(normalizeNameForMatch(prefix)) === 0; });
-    return keys.length === 1 ? { name: keys[0], v: info[keys[0]] } : null;
-  };
+  if (!isTestMode()) { ok = false; lines.push('不合格: 試験モードではありません（スクリプト プロパティに MODE=test を登録した、コピーのスプレッドシートで実行してください）'); return finish(); }
   try {
-    // 1. 10月分 高橋さん
-    cache.remove('leave_result_202610');
-    const oct = getLeaveInfoAtMonthEnd('2026-10');
-    const t = oct && oct.found ? findBy(oct.leaveInfo, '高橋') : null;
-    check(!!t && Number(t.v.remainingDays) === 8 && t.v.nextGrantDate === '2026/11/01',
-      '10月分 高橋さん = ' + (t ? t.v.remainingDays + '日・' + t.v.nextGrantDate : '見つからない（' + (oct && (oct.reason || oct.message)) + '）') + '（正解 8日・2026/11/01）');
-    // 2. 9月分 小田さん・4月分
-    cache.remove('leave_result_202609');
-    const sep = getLeaveInfoAtMonthEnd('2026-09');
-    const o = sep && sep.found ? findBy(sep.leaveInfo, '小田') : null;
-    check(!!o, '9月分を計算できた');
-    if (o) show('9月分 小田さん = ' + o.v.remainingDays + '日・' + o.v.nextGrantDate + '（10/3 付与を含まない、chihiro の手直しの値と同じか）');
-    cache.remove('leave_result_202604');
-    const apr = getLeaveInfoAtMonthEnd('2026-04');
-    check(!!(apr && apr.found), '2026年4月分を計算できた（' + (apr && (apr.fileName || apr.reason)) + '）');
-    if (apr && apr.found) show('2026年4月分は「' + apr.fileName + '」で計算（前年度のファイルか）。誰か1人を管理簿と手で照らす');
-    // 3. 同時に計算が来たとき
-    const props = PropertiesService.getScriptProperties();
-    const foreign = JSON.stringify({ runId: 'release-check-other', until: Date.now() + 60000 });
-    props.setProperty(LEAVE_CALC_RUNNING_PROP, foreign);
-    cache.remove('leave_result_202610');
-    const busy = getLeaveInfoAtMonthEnd('2026-10');
-    check(busy && busy.status === 'busy', '計算中に来た計算は「少し待って」になる');
-    check(props.getProperty(LEAVE_CALC_RUNNING_PROP) === foreign, '他の計算の印を消さない');
-    props.deleteProperty(LEAVE_CALC_RUNNING_PROP);
-    const calcId = props.getProperty(LEAVE_CALC_SS_PROP);
-    const calcSheets = calcId ? openSpreadsheetChecked(calcId, '有給月末計算用').getSheets().map(function(s) { return s.getName(); }) : [];
-    check(calcSheets.length === 1 && calcSheets[0] === LEAVE_CALC_KEEP_SHEET, '計算用ファイルには _keep だけが残る（' + calcSheets.join(',') + '）');
-    // 4. 打刻の往復
     const ss = getTimecardSs();
-    const staff = '試験_リリース確認';
     const tz = Session.getScriptTimeZone();
+    // 1. 読み取り
+    const ym = Utilities.formatDate(new Date(), tz, 'yyyyMM');
+    const all = JSON.parse(getAllRecords(resolveRecordRange({ month: ym })).getContent());
+    check(all.status === 'ok' && Array.isArray(all.records), '今月の勤怠を読める（' + (all.records ? all.records.length : 0) + '件）');
+    check(!(all.unreadableSheets && all.unreadableSheets.length), '読めないシートが無い' + (all.unreadableSheets && all.unreadableSheets.length ? '（' + all.unreadableSheets.join('、') + '）' : ''));
+    const st = getSettings(ss);
+    check(!!(st && Array.isArray(st.staffList) && st.staffList.length > 0), 'スタッフ名簿を読める');
+    check(!!(st && st.confirmationsOk === true), '本人確認を読める');
+    // 2. 打刻の往復
+    const staff = '試験_リリース確認';
     const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
     const id = 'release-' + Utilities.getUuid();
     const nowIso = new Date().toISOString();

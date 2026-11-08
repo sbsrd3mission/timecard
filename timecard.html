@@ -1565,7 +1565,7 @@
             };
 
             // ===== 月次エクセル出力（2026-11-08 改修: 設計書 3.3・3.5-10・3.6-9） =====
-            // 1. 未送信を送り切る → 2. 対象月の勤怠（getAll month=）・設定（名簿・本人確認）・有給（対象月末時点）をクラウドから取り直す
+            // 1. 未送信を送り切る → 2. 対象月の勤怠（getAll month=）・設定（名簿・本人確認）・有給（管理簿の今の値＝出力した日の時点）をクラウドから取り直す
             // → 3. 取り直した結果そのものでExcelを作る（手元の値は使わない）。
             // 止める条件（統一）: 勤怠・名簿・本人確認のどれかが取れない、または読めないシートがある → 出力しない（理由を表示）。
             // 有給だけが取れない → 出力は続け、有給欄に「取得できず」と書き、画面でも知らせる。
@@ -1646,15 +1646,8 @@
                     if (d && d.status === 'ok' && d.stale) d = await fetchJson(url());
                     return d;
                 };
-                const fetchLeave = async () => {
-                    // 計算中・30秒以内の連続は「少し待ってもう一度」が返るので、少し待って最大3回
-                    for (let i = 0; i < 3; i++) {
-                        const d = await fetchJson(gasUrl + '?action=getLeaveInfo&month=' + ym + '&t=' + Date.now());
-                        if (!d || d.status !== 'busy') return d;
-                        await new Promise(ok => setTimeout(ok, i === 0 ? 5000 : 15000));
-                    }
-                    return { status: 'busy', message: '有給の計算が混み合っています' };
-                };
+                // 【2026-11-08 オーナー決定】有給は月末時点の計算をやめ、今までどおり管理簿の今の値（出力した日の時点）を取る
+                const fetchLeave = async () => fetchJson(gasUrl + '?action=getLeaveInfo&year=' + yearStr + '&t=' + Date.now());
                 // 【コードレビュー1-3】GAS への取得は同時に投げず、1件ずつ順番に（勤怠 → 設定 → 有給）
                 const settle = async (fn) => { try { return { status: 'fulfilled', value: await fn() }; } catch (e) { return { status: 'rejected', reason: e }; } };
                 const monthRes = await settle(fetchMonthData);
@@ -1706,18 +1699,17 @@
                     if (!prep) return;
                     const { staff: exportStaff, confirmations: exportConfirmations, records: exportRecords, recordById, leaveRes } = prep;
 
-                    // 有給（対象月末時点）
+                    // 有給（管理簿の今の値＝出力した日の時点。2026-11-08 オーナー決定で月末時点の計算はやめた）
                     let leaveInfo = {};
                     let leaveOk = false;
-                    let leaveBaseDate = `${year}/${month}/${daysInMonth}`;
+                    const exportDay = new Date();
+                    const leaveBaseDate = `${exportDay.getFullYear()}/${exportDay.getMonth() + 1}/${exportDay.getDate()}`;
                     let leaveFailReason = '';
                     const lv = leaveRes.status === 'fulfilled' ? leaveRes.value : null;
-                    // 月末時点の値には基準日（baseDate）が付く。付いていない返事（GAS 更新前の古い GAS は「今日」時点の値）は使わない
-                    if (lv && lv.status === 'ok' && lv.found && lv.leaveInfo && lv.baseDate) {
+                    if (lv && lv.status === 'ok' && lv.found && lv.leaveInfo) {
                         leaveInfo = lv.leaveInfo; leaveOk = true;
-                        leaveBaseDate = lv.baseDate;
-                    } else if (lv && lv.status === 'ok' && lv.found && !lv.baseDate) {
-                        leaveFailReason = 'GAS が古いため月末時点の値を取得できません';
+                    } else if (lv && lv.status === 'ok' && !lv.found) {
+                        leaveFailReason = `Googleドライブの「有給」フォルダに「年次有給休暇管理簿${yearStr}」が見つかりません`;
                     } else {
                         leaveFailReason = leaveRes.status === 'rejected' ? (leaveRes.reason?.message || '通信エラー') : ((lv && (lv.reason || lv.message)) || '不明');
                     }
@@ -1948,7 +1940,7 @@
 
                         // ===== 有給休暇（A33〜E34・全員同じ位置） =====
                         // 「今月の消化日数」は取り直した勤怠データから、「残日数・次回付与日」は
-                        // 有給管理簿を対象月の末日時点で計算し直した値（GAS getLeaveInfo&month=）。
+                        // 有給管理簿の今の値（出力した日の時点。GAS getLeaveInfo&year=）。
                         try {
                             const leaveRow33 = ws.getRow(startRow + 31); // 33行目相当
                             const leaveRow34 = ws.getRow(startRow + 32); // 34行目相当
@@ -1980,8 +1972,8 @@
                                     setNormalCell(leaveRow34, 5, '');
                                 }
                             }
-                            // 基準日（3.3-1）: 有給欄のすぐ下（A35）
-                            setNormalCell(ws.getRow(startRow + 33), 1, leaveOk ? `有給は ${leaveBaseDate} 時点` : '有給は取得できず');
+                            // 基準日（3.3-1）: 有給欄のすぐ下（A35）。値は出力した日の時点
+                            setNormalCell(ws.getRow(startRow + 33), 1, leaveOk ? `有給は ${leaveBaseDate}（出力日）時点` : '有給は取得できず');
                         } catch (e) { console.warn('有給欄の書き込みに失敗', e); }
 
                         // ===== オンライン業務欄（3.3-3・chihiro指示 2026-11-08） =====

@@ -535,7 +535,8 @@
 
             // 【コードレビュー1-9】サーバーが打刻の時刻（と日付）を直したとき（時計のずれ2分超）、画面の記録も直した値にする
             const applyServerCorrection = (op, c) => {
-                if (!op || !c || !c.field || !c.date || !c.time) return;
+                // 【コードレビュー2-4】サーバーがこの操作で時刻の欄を本当に書いたとき（written）だけ直す
+                if (!op || !c || !c.written || !c.field || !c.date || !c.time) return;
                 const fromId = `${op.staffName}_${op.date}`;
                 const toId = `${op.staffName}_${c.date}`;
                 const sentTime = op.data && op.data.time;

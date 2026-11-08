@@ -1492,6 +1492,14 @@
             // ===== 出力の前準備（通常の出力・外注の出力で共通。3.7-7・3.9-5） =====
             // 1. この端末の未送信を送る → 2. opStatus で全部届いたことを確かめる（届かなければ出力しない）
             // → 3. 対象月・名簿・本人確認（と有給）を取り直す → 出力にはこの結果だけを使う。中止のときは null を返す
+            // ExcelJS はファイルから読んだ書式を、同じ書式のセル同士で1つのものとして共有する。そのまま1つのセルの
+            // 塗り・文字・罫線・表示形式を変えると、同じ書式の他のセル（別の日の行や見出し）まで変わってしまう
+            // （10月の出力で平日まで土曜の水色になっていた原因）。書き込む前に、各セルに自分専用の書式を持たせる。
+            const unshareStyles = (ws) => {
+                ws.eachRow({ includeEmpty: true }, (row) => {
+                    row.eachCell({ includeEmpty: true }, (cell) => { cell.style = JSON.parse(JSON.stringify(cell.style || {})); });
+                });
+            };
             const writeDeviceWarning = (workbook, warning) => {
                 if (!warning || !workbook.worksheets[0]) return;
                 const ws = workbook.worksheets[0];
@@ -1742,6 +1750,7 @@
                     // ステップ1: マスタ（＝草野久美子シートと同じ形のテンプレート）の日付・曜日を対象月に書き換え、書式を整える
                     const masterWs = workbook.getWorksheet('マスタ');
                     if (!masterWs) throw new Error('テンプレートに「マスタ」シートがありません');
+                    unshareStyles(masterWs); // 複製したシートもセルごとに別の書式になる
                     const startRow = 2; // 1行目が見出し、2行目から1日〜31日
                     for (let d = 1; d <= 31; d++) {
                         const row = masterWs.getRow(startRow + d - 1);
@@ -2077,6 +2086,7 @@
                     const bytes = new Uint8Array(binaryStr.length);
                     for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
                     await workbook.xlsx.load(bytes.buffer);
+                    workbook.eachSheet((ws) => unshareStyles(ws));
 
                     // ステップ1: 全シートの日付・曜日を対象月に更新（通常出力と同じ）
                     const findStartRow = (ws) => {
@@ -2151,7 +2161,7 @@
                                     row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
                                         const newCell = newRow.getCell(colNumber);
                                         newCell.value = cell.value;
-                                        newCell.style = cell.style;
+                                        newCell.style = JSON.parse(JSON.stringify(cell.style || {}));
                                     });
                                 });
                                 if (masterWs.model.merges) {

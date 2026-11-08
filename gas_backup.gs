@@ -671,7 +671,7 @@ function processOneOp(ss, op, opId, sender, serverNow, opLog) {
     res = { result: 'error', reason: String(err && err.message ? err.message : err) };
   }
   // 勤怠の行を書いたらすぐ世代を進める（EditLog の失敗で「受付」のまま残るときも。書いた分のキャッシュは使わない）
-  if (res.wrote) bumpCacheGeneration();
+  if (res.wrote || res.result === 'applied') bumpCacheGeneration();
   delete res.wrote;
   // ③ OpLog を「完了」にする。error（一時的な失敗）は「受付」のまま残す＝再送で同じ時刻・受付順で当て直す
   if (res.result !== 'error') {

@@ -84,6 +84,9 @@ const RECORDS_CACHE_GEN_KEY = 'getAll_cache_gen_v2';
 // 60秒キャッシュ。書き込み時は即破棄するため打刻の反映は遅れない。
 // （スプレッドシートを直接手編集した場合のみ最大60秒反映が遅れる）
 const RECORDS_CACHE_SECONDS = 60;
+// 作り直し中の印（20秒で失効）と、他の呼び出しがキャッシュの完成を待つ最長時間（3.10-4）
+const RECORDS_REBUILD_FLAG_SECONDS = 20;
+const RECORDS_REBUILD_WAIT_MS = 3000;
 
 function doGet(e) {
   const action = e.parameter.action;
@@ -100,30 +103,31 @@ function doGet(e) {
       return ContentService.createTextOutput(cached)
         .setMimeType(ContentService.MimeType.JSON);
     }
-    // ===== キャッシュ再構築の同時多発（スタンピード）防止 =====
-    // キャッシュ切れの瞬間に複数端末から重い全件読み込みが同時実行されると
-    // GASの同時実行上限に達して404が返るため、再構築は1つに直列化する。
-    // ※ doPost（打刻）はgetScriptLockを使用しており、こちらはgetDocumentLockなので
-    //    打刻処理をブロックすることはない。
-    const lock = LockService.getDocumentLock();
-    let locked = false;
-    try { locked = lock.tryLock(25000); } catch (err) { locked = false; }
-    if (locked) {
-      try {
-        // ロック待ちの間に他の実行がキャッシュを作った可能性を再確認
-        const gen2 = getCacheGeneration(true);
-        cached = getRecordsCache(range.key, gen2);
+    // ===== キャッシュ再構築の同時多発（スタンピード）防止（3.10-4 で作り替え） =====
+    // Webアプリから呼ぶ getDocumentLock() は null になり、以前の「1つずつ並べる」処理は効いていなかったのでやめた。
+    // 作り直し中の印（CacheService・20秒で失効）があれば、最大3秒だけキャッシュの完成を待ち、
+    // 間に合わなければ自分で読む。打刻（doPost）はこの印を見ないので待たされない。
+    const cache = CacheService.getScriptCache();
+    const flagKey = 'getAll_rebuilding_' + range.key;
+    let mine = false;
+    if (cache.get(flagKey)) {
+      const waitUntil = Date.now() + RECORDS_REBUILD_WAIT_MS;
+      while (Date.now() < waitUntil) {
+        Utilities.sleep(300);
+        cached = getRecordsCache(range.key, getCacheGeneration(true));
         if (cached) {
           return ContentService.createTextOutput(cached)
             .setMimeType(ContentService.MimeType.JSON);
         }
-        return getAllRecords(range);
-      } finally {
-        lock.releaseLock();
       }
+    } else {
+      try { cache.put(flagKey, '1', RECORDS_REBUILD_FLAG_SECONDS); mine = true; } catch (err) {}
     }
-    // ロックが取れなかった場合も従来通り自力で構築（フォールバック）
-    return getAllRecords(range);
+    try {
+      return getAllRecords(range);
+    } finally {
+      if (mine) { try { cache.remove(flagKey); } catch (err) {} }
+    }
   } else if (action === 'getRecord') {
     // 名前を選んだ時点で、その人のその日の行だけを返す（3.1(4)）。キャッシュは使わずシートを直接読む。
     // 返事にも世代番号を付ける（端末は今までに見た最大より古ければ使わない。3.9-3）
@@ -558,23 +562,23 @@ function doPost(e) {
         let normAt, seq, logRow;
         if (logged) {
           // 「受付」のまま残っていた（前回が途中で止まった）: 記録してある比較時刻・受付順でもう一度当てる（3.9-2）
-          normAt = logged.normAt; seq = logged.seq; logRow = logged.row;
+          normAt = logged.normAt; seq = logged.seq; logRow = logged.ref;
         } else {
           // 比べる時刻（at＋差）と受付順は、最初に受け付けたときに決めて OpLog に残す（3.8-2・3.9-2）
           const atParsed = Date.parse(op.at);
           normAt = isFinite(atParsed) ? atParsed + skewMs : serverNow;
-          seq = ++opLog.maxSeq;
+          seq = nextOpSeq(opLog);
           if (normAt < serverNow - OP_TOO_OLD_DAYS * 86400000) {
             // OpLog に無く、180日より古い操作は当てない（3.8-8）
             const r0 = { result: 'skipped', reason: 'too_old' };
-            appendOpLogRow(ss, opLogRowValues(op, r0.result, r0.reason, serverNow, sender, normAt, seq));
+            appendOpLogRow(ss, opLogRowValues(op, r0.result, r0.reason, serverNow, sender, normAt, seq), serverNow);
             opLog.map[opId] = { result: r0.result, reason: r0.reason };
             results[opId] = r0;
             return;
           }
           // ① 先に「受付」を書く
-          logRow = appendOpLogRow(ss, opLogRowValues(op, OPLOG_ACCEPTED, '', serverNow, sender, normAt, seq));
-          opLog.map[opId] = { result: OPLOG_ACCEPTED, reason: '', normAt: normAt, seq: seq, row: logRow };
+          logRow = appendOpLogRow(ss, opLogRowValues(op, OPLOG_ACCEPTED, '', serverNow, sender, normAt, seq), serverNow);
+          opLog.map[opId] = { result: OPLOG_ACCEPTED, reason: '', normAt: normAt, seq: seq, ref: logRow };
         }
         // ② 勤怠の行を書く（1日分の1〜17列を1回で）
         let res;
@@ -659,7 +663,7 @@ function getAllRecords(range) {
     const sheetName = sheet.getName();
     // シート名は「スタッフ名_YYYYMM」形式を期待
     const nm = sheetName.match(/^(.+)_(\d{6})$/);
-    if (!nm) return;
+    if (!nm || nm[1] === OPLOG_SHEET_NAME) return; // OpLog_YYYYMM は勤怠のシートではない
     if (range.months && range.months.indexOf(nm[2]) === -1) return;
 
     const lastRow = sheet.getLastRow();
@@ -775,12 +779,23 @@ function fieldInfo(meta, f) {
   return { t: (x && Number(x.t)) || 0, q: (x && Number(x.q)) || 0, m: !!(x && x.m), L: !!(x && x.L) };
 }
 const ALL_FIELDS = ['clockIn', 'breakStart', 'breakEnd', 'clockOut', 'meal', 'transport', 'remarks', 'additionalBreakMins', 'isPaidLeave', 'deleted'];
+// 17列目が「使える」か: 空でなく、かつ 10列目（サーバーの更新時刻）が17列目に残した書き込み時刻（w）より新しくないこと。
+// 【3.10-6】古い版の GAS に戻していた間に書かれた行は15〜17列目が更新されず値と食い違うので、17列目を空として扱い、
+// 最初に書くときに作り直す。
+const META_STALE_TOLERANCE_MS = 2000;
 function hasMetaCell(row) {
-  return !!String(row[COL.meta - 1] || '').trim();
+  const raw = String(row[COL.meta - 1] || '').trim();
+  if (!raw) return false;
+  const meta = parseMeta(raw);
+  const su = row[COL.serverUpdatedAt - 1];
+  const suMs = su instanceof Date ? su.getTime() : (su ? Date.parse(String(su)) : NaN);
+  if (meta.w && isFinite(suMs) && suMs > Number(meta.w) + META_STALE_TOLERANCE_MS) return false;
+  return true;
 }
 function metaForRow(row) {
-  const meta = parseMeta(row[COL.meta - 1]);
-  if (!hasMetaCell(row)) {
+  const valid = hasMetaCell(row);
+  const meta = valid ? parseMeta(row[COL.meta - 1]) : { f: {} };
+  if (!valid) {
     const base = rowCompareMs(row);
     const tagged = String(row[COL.remarks - 1] || '').indexOf('【本人修正済】') !== -1;
     ALL_FIELDS.forEach(function(f) {
@@ -972,8 +987,8 @@ function applyOp(ss, op, sender, serverNow, normAt, seq) {
   if (op.type === 'confirm') {
     const d = op.data || {};
     // 確認日時は実行時刻ではなく操作時刻（直したもの）を使う（3.8-3）
-    const r = confirmMonth(ss, op.staffName, d.yearMonth, op.opId, atConfirm);
-    return { result: r.result || (r.status === 'ok' ? 'applied' : 'invalid'), reason: r.message };
+    const r = confirmMonth(ss, op.staffName, d.yearMonth, op.opId, atConfirm, seq);
+    return { result: r.result || (r.status === 'ok' ? 'applied' : 'invalid'), reason: r.message || r.reason };
   }
   const planner = OP_PLANNERS[op.type];
   if (!planner) return { result: 'invalid', reason: '不明な操作: ' + op.type };
@@ -1034,6 +1049,7 @@ function applyOp(ss, op, sender, serverNow, normAt, seq) {
     if (leave.indexOf(f) !== -1) entry.L = 1;
     meta.f[f] = entry;
   });
+  meta.w = now.getTime(); // この行を書いたサーバー時刻（10列目と同じ。3.10-6）
   newRow[COL.meta - 1] = JSON.stringify(meta);
   newRow[COL.serverUpdatedAt - 1] = now;
   // 11列目（更新時刻）は「今の値と操作時刻の大きい方」で、戻らない（3.6-1）
@@ -1051,8 +1067,11 @@ function applyOp(ss, op, sender, serverNow, normAt, seq) {
   }
 
   const targetRow = exists ? found.rowIndex : Math.max(sheet.getLastRow() + 1, 2);
+  // 1日分の1〜17列を1回で書き、すぐ確定させる（3.9-2・3.10-1）
   sheet.getRange(targetRow, 1, 1, SHEET_COLS).setValues([newRow]);
-  if (clockFix) appendEditLogLine(ss, staffName, dateStr, '時計補正 ' + clockFix.from + ' → ' + clockFix.to + '（送信元 ' + (sender || '不明') + '）');
+  SpreadsheetApp.flush();
+  // 時計補正の記録は、実際に時刻を書いたときだけ（途中で止まって当て直したときに二重にしない。3.10-1）
+  if (clockFix && fields.indexOf(opData.field) !== -1 && formatTimeCell(oldRow[COL[opData.field] - 1]) !== writes[opData.field]) appendEditLogLine(ss, staffName, dateStr, '時計補正 ' + clockFix.from + ' → ' + clockFix.to + '（送信元 ' + (sender || '不明') + '）');
   return { result: 'applied', reason: plan.reason };
 }
 
@@ -1280,36 +1299,61 @@ function ensureSheetColumns(sheet) {
 }
 
 // ===== OpLog（3.6-4・3.7-5）: 処理した opId と結果を残す（180日分） =====
-// 【3.9-2】書く順番: ①「受付」（opId・比べる時刻・受付順）→ ② 勤怠の行 → ③「完了」（結果・理由）。
+// 【3.9-2・3.10-1】書く順番: ①「受付」（opId・比べる時刻・受付順）→ flush → ② 勤怠の行 → flush → ③「完了」（結果・理由）→ flush。
 // 「受付」のまま残った opId は、再送のときに記録した比較時刻・受付順でもう一度当てる（何度当てても同じ結果）。
+// 【3.10-3】OpLog は月ごとのシート（OpLog_YYYYMM、受け付けた月）に書き、行は消さない。照会は直近7か月分のシートを見る。
+// 180日より古い月のシートは毎晩の自動実行で丸ごと消す（今月・先月は消さない）。
 const OPLOG_ACCEPTED = 'accepted';
 const OPLOG_COLS = 11;
-function getOpLogSheet(ss, create) {
-  let sh = ss.getSheetByName(OPLOG_SHEET_NAME);
+const OPLOG_LOOKUP_MONTHS = 7;
+const OPLOG_SEQ_PROP = 'OPLOG_SEQ';
+function opLogSheetName(ms) {
+  return OPLOG_SHEET_NAME + '_' + Utilities.formatDate(new Date(ms), 'Asia/Tokyo', 'yyyyMM');
+}
+function getOpLogSheet(ss, name, create) {
+  let sh = ss.getSheetByName(name);
   if (!sh && create) {
-    sh = ss.insertSheet(OPLOG_SHEET_NAME);
+    sh = ss.insertSheet(name);
     sh.setTabColor('#9e9e9e');
     sh.getRange(1, 1, 1, OPLOG_COLS).setValues([['opId', '結果', '理由', '受信時刻', '操作時刻', '種類', 'スタッフ', '日付', '送信元', '比べた時刻（直した操作時刻）', '受付順']]);
     sh.getRange(1, 1, 1, OPLOG_COLS).setFontWeight('bold').setBackground('#eeeeee');
   }
   return sh;
 }
+// 直近7か月分のシート名（新しい順）
+function recentOpLogSheetNames(nowMs) {
+  const d = new Date(nowMs);
+  const names = [];
+  for (let i = 0; i < OPLOG_LOOKUP_MONTHS; i++) {
+    names.push(opLogSheetName(new Date(d.getFullYear(), d.getMonth() - i, 15).getTime()));
+  }
+  return names;
+}
 
-// { map: { opId: {result, reason, normAt, seq, row} }, maxSeq }
+// { map: { opId: {result, reason, normAt, seq, ref:{sheet,row}} }, maxSeq }
 function loadOpLog(ss) {
-  const out = { map: {}, maxSeq: 0 };
-  const sh = getOpLogSheet(ss, false);
-  if (!sh || sh.getLastRow() < 2) return out;
-  const n = sh.getLastRow() - 1;
-  const values = sh.getRange(2, 1, n, OPLOG_COLS).getValues();
-  values.forEach(function(r, i) {
-    const id = String(r[0] || '');
-    const seq = Number(r[10]) || 0;
-    if (seq > out.maxSeq) out.maxSeq = seq;
-    if (!id || out.map[id]) return; // 最初の行
-    out.map[id] = { result: String(r[1] || ''), reason: String(r[2] || ''), normAt: Date.parse(String(r[9] || '')), seq: seq, row: i + 2 };
+  const out = { map: {}, maxSeq: Number(PropertiesService.getScriptProperties().getProperty(OPLOG_SEQ_PROP)) || 0 };
+  // 古い月から読む（同じ opId は最初の行）
+  recentOpLogSheetNames(Date.now()).reverse().forEach(function(name) {
+    const sh = ss.getSheetByName(name);
+    if (!sh || sh.getLastRow() < 2) return;
+    const values = sh.getRange(2, 1, sh.getLastRow() - 1, OPLOG_COLS).getValues();
+    values.forEach(function(r, i) {
+      const id = String(r[0] || '');
+      const seq = Number(r[10]) || 0;
+      if (seq > out.maxSeq) out.maxSeq = seq;
+      if (!id || out.map[id]) return;
+      out.map[id] = { result: String(r[1] || ''), reason: String(r[2] || ''), normAt: Date.parse(String(r[9] || '')), seq: seq, ref: { sheet: name, row: i + 2 } };
+    });
   });
   return out;
+}
+
+// 受付順の番号を1つ進める（スクリプトのプロパティにも残す。打刻と同じロックの中で呼ぶ）
+function nextOpSeq(opLog) {
+  opLog.maxSeq += 1;
+  PropertiesService.getScriptProperties().setProperty(OPLOG_SEQ_PROP, String(opLog.maxSeq));
+  return opLog.maxSeq;
 }
 
 function opLogRowValues(op, result, reason, serverNow, sender, normAt, seq) {
@@ -1317,38 +1361,45 @@ function opLogRowValues(op, result, reason, serverNow, sender, normAt, seq) {
     String(op.type || ''), String(op.staffName || ''), String(op.date || ''), sender || '', new Date(normAt).toISOString(), String(seq || '')];
 }
 
-// 1行足して、その行番号を返す
-function appendOpLogRow(ss, values) {
-  const sh = getOpLogSheet(ss, true);
+// 今月の OpLog シートに1行足して確定させ、その場所を返す
+function appendOpLogRow(ss, values, serverNow) {
+  const name = opLogSheetName(serverNow);
+  const sh = getOpLogSheet(ss, name, true);
   const row = Math.max(sh.getLastRow() + 1, 2);
   const range = sh.getRange(row, 1, 1, OPLOG_COLS);
   range.setNumberFormat('@'); // 自動変換（日付・数値）を防ぐ
   range.setValues([values]);
-  return row;
+  SpreadsheetApp.flush();
+  return { sheet: name, row: row };
 }
 
 // 「受付」の行を「完了」にする（結果・理由の2列だけ書く）
-function finishOpLogRow(ss, row, result, reason) {
-  const sh = getOpLogSheet(ss, true);
-  sh.getRange(row, 2, 1, 2).setValues([[result, String(reason || '').substring(0, 500)]]);
+function finishOpLogRow(ss, ref, result, reason) {
+  const sh = getOpLogSheet(ss, ref.sheet, true);
+  sh.getRange(ref.row, 2, 1, 2).setValues([[result, String(reason || '').substring(0, 500)]]);
+  SpreadsheetApp.flush();
 }
 
-// 180日より古い行を消す（3.7-5）。毎晩の時間主導トリガーで実行する（打刻のたびには行わない）。
+// 180日より古い月の OpLog シートを丸ごと消す（今月・先月は消さない）。毎晩の時間主導トリガーで実行する。
+// 打刻と同じ getScriptLock を最大10秒待ち、取れなければ翌晩に回す。
 // 反映手順で installOpLogPruneTrigger() を1回だけ実行してトリガーを作る。
 function pruneOpLogDaily() {
   const ss = getTimecardSs();
   const lock = LockService.getScriptLock();
-  try { lock.waitLock(30000); } catch (e) { return; }
+  try { lock.waitLock(10000); } catch (e) { console.warn('pruneOpLogDaily: ロックが取れないため翌晩に回します'); return; }
   try {
-    const sh = getOpLogSheet(ss, false);
-    if (!sh) return;
-    const last = sh.getLastRow();
-    if (last < 2) return;
-    const cutoff = Date.now() - OPLOG_KEEP_DAYS * 86400000;
-    const recv = sh.getRange(2, 4, last - 1, 1).getValues();
-    let n = 0;
-    while (n < recv.length && Date.parse(String(recv[n][0])) < cutoff) n++;
-    if (n > 0) sh.deleteRows(2, n);
+    const now = new Date();
+    const keep = {};
+    keep[opLogSheetName(now.getTime())] = true;
+    keep[opLogSheetName(new Date(now.getFullYear(), now.getMonth() - 1, 15).getTime())] = true;
+    const cutoff = now.getTime() - OPLOG_KEEP_DAYS * 86400000;
+    const re = new RegExp('^' + OPLOG_SHEET_NAME + '_(\\d{4})(\\d{2})$');
+    ss.getSheets().forEach(function(sh) {
+      const m = sh.getName().match(re);
+      if (!m || keep[sh.getName()]) return;
+      const monthEnd = new Date(parseInt(m[1], 10), parseInt(m[2], 10), 1).getTime(); // 翌月1日0時
+      if (monthEnd <= cutoff) ss.deleteSheet(sh);
+    });
   } finally {
     lock.releaseLock();
   }
@@ -1359,6 +1410,13 @@ function installOpLogPruneTrigger() {
     if (t.getHandlerFunction() === 'pruneOpLogDaily') ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('pruneOpLogDaily').timeBased().everyDays(1).atHour(3).create();
+}
+
+// 反映後の確認用: OpLog 掃除の自動実行が1つだけ設定されているかを実行ログに出す
+function checkOpLogPruneTrigger() {
+  const n = ScriptApp.getProjectTriggers().filter(function(t) { return t.getHandlerFunction() === 'pruneOpLogDaily'; }).length;
+  console.log(n === 1 ? 'OK: OpLog の掃除（pruneOpLogDaily）は1つ設定されています' : 'NG: pruneOpLogDaily の設定が ' + n + ' 個です。installOpLogPruneTrigger を実行してください');
+  return n;
 }
 
 // EditLog に1行足す（時計のずれ・時計補正など）
@@ -1566,7 +1624,8 @@ function recordDailySettingsBackup() {
 // ===== 月次確認の記録（押すたびに日時を上書き） =====
 // 【2026-11-08】対象行を先に決め（既存行は日本時間で「YYYY-MM」に直して照合）、
 // そのセルを「書式なしテキスト」にしてから値を書く（appendRow は使わない。日付への自動変換を防ぐ）。（3.3-2・3.5-8）
-function confirmMonth(ss, staffName, yearMonth, opId, atMs) {
+// 【3.10-5】確認日時は「直した操作時刻・受付順」の組が今の記録より新しいときだけ上書きする（5・6列目に比較用の値を残す）
+function confirmMonth(ss, staffName, yearMonth, opId, atMs, seq) {
   if (!staffName || !/^\d{4}-\d{2}$/.test(String(yearMonth || ''))) {
     return { status: 'error', result: 'invalid', message: 'スタッフ名と対象月を指定してください' };
   }
@@ -1574,29 +1633,40 @@ function confirmMonth(ss, staffName, yearMonth, opId, atMs) {
   if (!sheet) {
     sheet = ss.insertSheet('Confirmations');
     sheet.setTabColor('#3f51b5');
-    sheet.getRange(1, 1, 1, 4).setValues([['スタッフ名', '対象月', '確認日時', 'opId']]);
-    sheet.getRange(1, 1, 1, 4).setFontWeight('bold').setBackground('#e8eaf6');
+    sheet.getRange(1, 1, 1, 6).setValues([['スタッフ名', '対象月', '確認日時', 'opId', '比較時刻', '受付順']]);
+    sheet.getRange(1, 1, 1, 6).setFontWeight('bold').setBackground('#e8eaf6');
   }
-  const now = Utilities.formatDate(atMs ? new Date(atMs) : new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
+  const atVal = atMs ? Number(atMs) : Date.now();
+  const now = Utilities.formatDate(new Date(atVal), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
   const rows = readConfirmationRows(sheet);
   let targetRow = -1;
+  let cur = null;
   for (let i = 0; i < rows.length; i++) {
     if (rows[i].staff === String(staffName) && rows[i].ym === yearMonth) {
       if (opId && rows[i].opId === opId) return { status: 'ok', result: 'applied', reason: 'duplicate', confirmedAt: rows[i].at };
       targetRow = i + 2; // 上書き（最後に押した日時が有効）。複数あれば最後の行
+      cur = rows[i];
     }
   }
+  if (cur) {
+    // 今の記録の比較時刻（無い既存行は「確認日時」の分）より古い確認では上書きしない
+    const curT = cur.cmpAt || (Date.parse(String(cur.at).replace(' ', 'T') + ':00+09:00') || 0);
+    const curQ = cur.cmpSeq || 0;
+    const newer = atVal > curT || (atVal === curT && (!curQ || !seq || seq >= curQ));
+    if (!newer) return { status: 'ok', result: 'skipped', message: 'older_than_confirmation', confirmedAt: cur.at };
+  }
   if (targetRow === -1) targetRow = Math.max(sheet.getLastRow() + 1, 2);
-  const range = sheet.getRange(targetRow, 1, 1, 4);
+  const range = sheet.getRange(targetRow, 1, 1, 6);
   range.setNumberFormat('@');
-  range.setValues([[String(staffName), String(yearMonth), now, String(opId || '')]]);
+  range.setValues([[String(staffName), String(yearMonth), now, String(opId || ''), String(atVal), String(seq || '')]]);
+  SpreadsheetApp.flush();
   return { status: 'ok', result: 'applied', confirmedAt: now };
 }
 
 function readConfirmationRows(sheet) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
-  const cols = Math.min(Math.max(sheet.getLastColumn(), 3), 4);
+  const cols = Math.min(Math.max(sheet.getLastColumn(), 3), 6);
   const values = sheet.getRange(2, 1, lastRow - 1, cols).getValues();
   return values.map(function(r) {
     const ymCell = r[1];
@@ -1608,7 +1678,8 @@ function readConfirmationRows(sheet) {
     }
     const atCell = r[2];
     const at = atCell instanceof Date ? Utilities.formatDate(atCell, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') : String(atCell || '');
-    return { staff: String(r[0] || ''), ym: ym, at: at, opId: cols >= 4 ? String(r[3] || '') : '' };
+    return { staff: String(r[0] || ''), ym: ym, at: at, opId: cols >= 4 ? String(r[3] || '') : '',
+      cmpAt: cols >= 5 ? (Number(r[4]) || 0) : 0, cmpSeq: cols >= 6 ? (Number(r[5]) || 0) : 0 };
   });
 }
 
@@ -1679,7 +1750,7 @@ function listRowsChangedSinceBackup() {
   bak.getSheets().forEach(function(bs) {
     const name = bs.getName();
     const nm = name.match(/^(.+)_\d{6}$/);
-    if (!nm) return;
+    if (!nm || nm[1] === OPLOG_SHEET_NAME) return;
     const cs = cur.getSheetByName(name);
     if (!cs) { out.push(name + ': シートが無くなっています'); return; }
     readSheetRows(bs).forEach(function(br) {

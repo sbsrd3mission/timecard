@@ -685,7 +685,7 @@ function processOneOp(ss, op, opId, sender, serverNow, opLog) {
   if (res.result !== 'error') {
     if (logRow) finishOpLogRow(ss, logRow, res.result, res.reason);
     else appendOpLogRow(ss, opLogRowValues(op, res.result, res.reason, serverNow, sender, normAt, seq), serverNow); // 書く前に決まった結果（invalid など）
-    opLog.map[opId] = { result: res.result, reason: res.reason || '', before: (opLog.map[opId] || {}).before, seq: seq, normAt: normAt, staff: String(op.staffName || ''), date: String(op.date || '') };
+    opLog.map[opId] = { result: res.result, reason: res.reason || '', before: (opLog.map[opId] || {}).before, seq: seq, normAt: normAt, staff: String(op.staffName || ''), date: String(op.date || ''), ref: logRow };
   }
   return res;
 }
@@ -1169,7 +1169,7 @@ function applyOp(ss, op, sender, serverNow, normAt, seq, ctx) {
       const x = meta.f[f];
       return !!x && Number(x.t) === at && Number(x.q) === Number(seq);
     });
-    const landed = ownMark || landedByWriteChain(ctx.opLog, Number(seq), stored, meta);
+    const landed = ownMark || landedByWriteChain(ss, ctx.opLog, Number(seq), stored, meta);
     if (landed) {
       if (!ctx.editLogged) {
         try {
@@ -1320,7 +1320,9 @@ function editLogTextsForOp(ss, opId) {
 // 17列目のその項目の受付順（今の値を書いた操作）から始めて、その操作が書いたときに残した「直前に書いた操作の受付順」（pq）を
 // さかのぼる。途中でこの操作の受付順に行き着けば、この操作はその項目を書いていた（後から上書きされた）。
 // 受付順の前後には頼らない（先に受け付けて止まった操作が、後で再送されて上書きした場合もたどれる）。
-function landedByWriteChain(opLog, seq, stored, meta) {
+// 【コードレビュー4】鎖でたどる操作の記録は、ロックの中でシートから読み直してから使う
+// （同じまとめ送りの途中で、別の実行がその操作を当て直して re を足しているかもしれないため）。
+function landedByWriteChain(ss, opLog, seq, stored, meta) {
   if (!opLog || !opLog.map || !stored || !stored.w || !(seq > 0)) return false;
   const bySeq = {};
   Object.keys(opLog.map).forEach(function(id) { const e = opLog.map[id]; if (e && Number(e.seq) > 0) bySeq[Number(e.seq)] = e; });
@@ -1330,7 +1332,11 @@ function landedByWriteChain(opLog, seq, stored, meta) {
     while (q > 0 && !seen[q]) {
       if (q === seq) return true;
       seen[q] = true;
-      const e = bySeq[q];
+      let e = bySeq[q];
+      if (e && e.ref) {
+        const sh = ss.getSheetByName(e.ref.sheet);
+        if (sh) e = opLogEntryFromRow(sh.getRange(e.ref.row, 1, 1, OPLOG_COLS).getValues()[0], e.ref.sheet, e.ref.row);
+      }
       const plan = e && e.before ? effectivePlan(e.before) : null;
       if (!plan || !plan.pq || !Object.prototype.hasOwnProperty.call(plan.pq, f)) return false;
       q = Number(plan.pq[f]) || 0;
